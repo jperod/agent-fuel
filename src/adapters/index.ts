@@ -1,12 +1,13 @@
 export interface UsageSnapshot {
-  tool: 'codex' | 'claude-code' | 'agy';
+  tool: 'codex' | 'claude-code' | 'agy-gemini' | 'agy-other';
   remainingPercent: number | null;
   usedPercent?: number | null;
   resetAt?: string | null;
-  source: 'official-cli' | 'ccusage' | 'local-state' | 'provider-api' | 'unknown';
+  source: 'official-cli' | 'ccusage' | 'local-state' | 'provider-api' | 'cache' | 'unknown';
   raw?: unknown;
 }
 
 export interface QuotaAdapter {
-  fetchSnapshot(): Promise<UsageSnapshot>;
+  /** Returns one or more snapshots (adapters that produce multiple rows return an array). */
+  fetchSnapshots(): Promise<UsageSnapshot[]>;
 }

@@ -4,55 +4,65 @@ import { QuotaAdapter, UsageSnapshot } from './index.js';
 
 const execAsync = promisify(exec);
 
+// Budget limit for the rolling 5-hour billing window.
+// Override with AGENT_FUEL_CLAUDE_BUDGET env var (dollars).
+const DEFAULT_BUDGET_USD = 20.0;
+
 export class ClaudeQuotaAdapter implements QuotaAdapter {
-  private budgetLimit: number;
+  private readonly budgetLimit: number;
 
   constructor() {
-    // Default to $10.00 for the rolling 5-hour window, allow env override
-    this.budgetLimit = Number(process.env.AGENT_FUEL_CLAUDE_BUDGET) || 10.0;
+    const override = Number(process.env.AGENT_FUEL_CLAUDE_BUDGET);
+    this.budgetLimit = Number.isFinite(override) && override > 0 ? override : DEFAULT_BUDGET_USD;
   }
 
-  public async fetchSnapshot(): Promise<UsageSnapshot> {
+  public async fetchSnapshots(): Promise<UsageSnapshot[]> {
+    return [await this._fetch()];
+  }
+
+  private async _fetch(): Promise<UsageSnapshot> {
+    const unknown = (): UsageSnapshot => ({
+      tool: 'claude-code',
+      remainingPercent: null,
+      usedPercent: null,
+      resetAt: null,
+      source: 'unknown',
+    });
+
     try {
-      // Execute ccusage to get billing block information in JSON format
-      // We run npx --no-install first to see if it's already cached/available, otherwise fall back to regular npx
       let stdout: string;
       try {
-        const result = await execAsync('npx --no-install ccusage blocks --json');
-        stdout = result.stdout;
+        ({ stdout } = await execAsync('npx --no-install ccusage blocks --json'));
       } catch {
-        throw new Error('ccusage package is not installed or available locally. Please run "npm install -g ccusage" to use this tool.');
+        throw new Error(
+          'ccusage not found. Run "npm install -g ccusage" to enable Claude Code tracking.',
+        );
       }
 
       const data = JSON.parse(stdout);
-      const blocks = data && Array.isArray(data.blocks) ? data.blocks : data;
-      
-      if (!blocks || !Array.isArray(blocks)) {
-        throw new Error('Invalid JSON format returned from ccusage blocks');
+      const blocks: unknown[] = Array.isArray(data?.blocks) ? data.blocks : data;
+
+      if (!Array.isArray(blocks)) {
+        throw new Error('Unexpected JSON shape from ccusage blocks.');
       }
 
-      // Find the active billing block
-      const activeBlock = blocks.find((block: any) => block.isActive === true);
+      const activeBlock = (blocks as Record<string, unknown>[]).find(
+        (b) => b.isActive === true,
+      );
 
-      if (!activeBlock) {
-        return {
-          tool: 'claude-code',
-          remainingPercent: null,
-          usedPercent: null,
-          resetAt: null,
-          source: 'unknown'
-        };
-      }
+      if (!activeBlock) return unknown();
 
-      const cost = activeBlock.costUSD || 0.0;
-      const usedPercent = (cost / this.budgetLimit) * 100;
-      const remainingPercent = Math.max(0, Math.min(100, Math.round(100 - usedPercent)));
+      const cost = typeof activeBlock.costUSD === 'number' ? activeBlock.costUSD : 0;
+      const usedPct = (cost / this.budgetLimit) * 100;
+      const remainingPercent = Math.max(0, Math.min(100, Math.round(100 - usedPct)));
 
       let resetAt: string | null = null;
-      if (activeBlock.endTime) {
+      if (typeof activeBlock.endTime === 'string') {
         try {
-          const endDate = new Date(activeBlock.endTime);
-          resetAt = endDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          resetAt = new Date(activeBlock.endTime).toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+          });
         } catch {
           resetAt = activeBlock.endTime;
         }
@@ -61,21 +71,16 @@ export class ClaudeQuotaAdapter implements QuotaAdapter {
       return {
         tool: 'claude-code',
         remainingPercent,
-        usedPercent: Math.round(usedPercent),
+        usedPercent: Math.round(usedPct),
         resetAt,
         source: 'ccusage',
-        raw: activeBlock
+        raw: activeBlock,
       };
 
     } catch (error) {
-      // Fallback in case of execution errors
       return {
-        tool: 'claude-code',
-        remainingPercent: null,
-        usedPercent: null,
-        resetAt: null,
-        source: 'unknown',
-        raw: error instanceof Error ? error.message : String(error)
+        ...unknown(),
+        raw: error instanceof Error ? error.message : String(error),
       };
     }
   }

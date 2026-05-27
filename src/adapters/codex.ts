@@ -1,117 +1,213 @@
-import { exec } from 'node:child_process';
+import { exec, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { QuotaAdapter, UsageSnapshot } from './index.js';
 
 const execAsync = promisify(exec);
 
-export class CodexQuotaAdapter implements QuotaAdapter {
-  private budgetLimit: number;
+// Used ONLY as a rough fallback estimate when the TUI scrape cannot determine
+// a percentage (i.e. quota has not yet been reached). This is a GUESS based on
+// local session cost data — not an official Codex quota signal.
+// Override with AGENT_FUEL_CODEX_BUDGET env var (dollars).
+const DEFAULT_BUDGET_USD = 20.0;
+const ROLLING_WINDOW_MS = 5 * 60 * 60 * 1000;
 
-  constructor() {
-    // Default budget limit of $20.00 for the rolling 5h window (Standard Team/Plus limit)
-    // Allows dynamic override using environment variable AGENT_FUEL_CODEX_BUDGET
-    this.budgetLimit = Number(process.env.AGENT_FUEL_CODEX_BUDGET) || 20.0;
+// ── TUI scraper (expect) ───────────────────────────────────────────────────
+
+/**
+ * Spawns `codex` via `expect`, handles the trust prompt, waits for the TUI to
+ * settle, then captures stdout/stderr to check for the quota-reached warning.
+ */
+function runCodexScrape(): Promise<string> {
+  return new Promise((resolve) => {
+    const expectScript = [
+      'set timeout 15',
+      'spawn codex',
+      'expect {',
+      '  -re "Press enter to continue" { send "\\r"; exp_continue }',
+      '  -re "Individual quota reached" { after 300; send "\\x03" }',
+      '  -re "for shortcuts" { after 300; send "\\x03" }',
+      '  timeout { }',
+      '  eof { }',
+      '}',
+      'expect eof',
+    ].join('\n');
+
+    const MAX_OUTPUT_BYTES = 64 * 1024;
+    let output = '';
+
+    const child = spawn('expect', ['-c', expectScript], {
+      env: { ...process.env },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    const append = (chunk: Buffer): void => {
+      if (output.length < MAX_OUTPUT_BYTES) output += chunk.toString();
+    };
+    child.stdout.on('data', append);
+    child.stderr.on('data', append);
+
+    const timer = setTimeout(() => { child.kill('SIGKILL'); resolve(output); }, 20_000);
+    child.on('close', () => { clearTimeout(timer); resolve(output); });
+  });
+}
+
+// ── Output parser ──────────────────────────────────────────────────────────
+
+function stripAnsi(str: string): string {
+  // eslint-disable-next-line no-control-regex
+  return str.replace(/\x1B\[[0-9;]*[A-Za-z]|\x1B[^[]/g, '').replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '');
+}
+
+interface CodexScrapeResult {
+  quotaReached: boolean;
+  resetIn: string | null; // e.g. "4h 33m"
+}
+
+function parseScrapeOutput(raw: string): CodexScrapeResult {
+  const clean = stripAnsi(raw);
+
+  // "Individual quota reached. Contact your administrator to enable overages. Resets in 4h33m29s."
+  const quotaMatch = clean.match(/Individual quota reached/i);
+  if (!quotaMatch) return { quotaReached: false, resetIn: null };
+
+  // Parse "Resets in 4h33m29s" → "4h 33m"
+  const resetMatch = clean.match(/Resets in\s*((?:\d+h)?(?:\d+m)?(?:\d+s)?)/i);
+  let resetIn: string | null = null;
+  if (resetMatch) {
+    const parts: string[] = [];
+    const hm = resetMatch[1].match(/^(\d+h)?(\d+m)?/);
+    if (hm) {
+      if (hm[1]) parts.push(hm[1]);
+      if (hm[2]) parts.push(hm[2]);
+    }
+    resetIn = parts.length > 0 ? parts.join(' ') : null;
   }
 
-  public async fetchSnapshot(): Promise<UsageSnapshot> {
+  return { quotaReached: true, resetIn };
+}
+
+// ── ccusage fallback estimate ──────────────────────────────────────────────
+
+async function fetchCcusageEstimate(budgetLimit: number): Promise<UsageSnapshot> {
+  const unknown = (): UsageSnapshot => ({
+    tool: 'codex',
+    remainingPercent: null,
+    usedPercent: null,
+    resetAt: null,
+    source: 'unknown',
+  });
+
+  try {
+    let stdout: string;
     try {
-      // Execute ccusage to get Codex session data
-      let stdout: string;
+      ({ stdout } = await execAsync('npx --no-install ccusage codex session --json'));
+    } catch {
+      return unknown();
+    }
+
+    const data = JSON.parse(stdout);
+    const sessions: unknown[] =
+      Array.isArray(data?.sessions) ? data.sessions :
+      Array.isArray(data?.session)  ? data.session  :
+      Array.isArray(data)           ? data           : [];
+
+    if (sessions.length === 0) {
+      return { tool: 'codex', remainingPercent: 100, usedPercent: 0, resetAt: null, source: 'ccusage' };
+    }
+
+    const todayStr = localDateString(new Date());
+    const todaySessions = (sessions as Record<string, unknown>[]).filter((s) => {
+      if (typeof s.lastActivity !== 'string') return false;
+      try { return localDateString(new Date(s.lastActivity)) === todayStr; }
+      catch { return false; }
+    });
+
+    if (todaySessions.length === 0) {
+      return { tool: 'codex', remainingPercent: 100, usedPercent: 0, resetAt: null, source: 'ccusage' };
+    }
+
+    const totalCost = todaySessions.reduce(
+      (acc, s) => acc + (typeof s.costUSD === 'number' ? s.costUSD : 0), 0,
+    );
+
+    const usedPct = (totalCost / budgetLimit) * 100;
+    const rawRemaining = 100 - usedPct;
+    const remainingPercent =
+      usedPct > 0 && rawRemaining > 99 ? 99
+        : Math.max(0, Math.min(100, Math.round(rawRemaining)));
+
+    const latestActivity = todaySessions
+      .map((s) => new Date(s.lastActivity as string).getTime())
+      .reduce((a, b) => (b > a ? b : a), 0);
+
+    let resetAt: string | null = null;
+    if (latestActivity > 0) {
       try {
-        const result = await execAsync('npx --no-install ccusage codex session --json');
-        stdout = result.stdout;
-      } catch {
-        throw new Error('ccusage package is not installed or available locally. Please run "npm install -g ccusage" to use this tool.');
-      }
+        resetAt = new Date(latestActivity + ROLLING_WINDOW_MS).toLocaleTimeString([], {
+          hour: '2-digit', minute: '2-digit',
+        });
+      } catch { /* leave null */ }
+    }
 
-      const data = JSON.parse(stdout);
-      const sessions = data && Array.isArray(data.sessions) ? data.sessions : (data && Array.isArray(data.session) ? data.session : data);
+    return {
+      tool: 'codex',
+      remainingPercent,
+      usedPercent: Math.round(usedPct),
+      resetAt,
+      source: 'ccusage',
+      raw: { totalCost, todaySessionsCount: todaySessions.length, isEstimate: true },
+    };
+  } catch {
+    return unknown();
+  }
+}
 
-      if (!sessions || !Array.isArray(sessions)) {
-        throw new Error('Invalid JSON format returned from ccusage codex session');
-      }
+// ── Adapter ────────────────────────────────────────────────────────────────
 
-      // Filter sessions for today's date in local time
-      const now = new Date();
-      const year = now.getFullYear();
-      const month = String(now.getMonth() + 1).padStart(2, '0');
-      const day = String(now.getDate()).padStart(2, '0');
-      const todayPrefix = `${year}-${month}-${day}`;
+export class CodexQuotaAdapter implements QuotaAdapter {
+  private readonly budgetLimit: number;
 
-      const todaySessions = sessions.filter((s: any) => {
-        if (!s.lastActivity) return false;
-        try {
-          const dateObj = new Date(s.lastActivity);
-          const sYear = dateObj.getFullYear();
-          const sMonth = String(dateObj.getMonth() + 1).padStart(2, '0');
-          const sDay = String(dateObj.getDate()).padStart(2, '0');
-          const sLocalDate = `${sYear}-${sMonth}-${sDay}`;
-          return sLocalDate === todayPrefix;
-        } catch {
-          return false;
-        }
-      });
+  constructor() {
+    const override = Number(process.env.AGENT_FUEL_CODEX_BUDGET);
+    this.budgetLimit = Number.isFinite(override) && override > 0 ? override : DEFAULT_BUDGET_USD;
+  }
 
-      if (todaySessions.length === 0) {
-        // No activity today, so 100% fuel remaining
+  public async fetchSnapshots(): Promise<UsageSnapshot[]> {
+    return [await this._fetch()];
+  }
+
+  private async _fetch(): Promise<UsageSnapshot> {
+    // Primary: scrape the Codex TUI via expect
+    try {
+      const raw = await runCodexScrape();
+      const result = parseScrapeOutput(raw);
+
+      if (result.quotaReached) {
+        // Ground truth: quota is exhausted
+        const resetAt = result.resetIn ? `Resets in ${result.resetIn}` : null;
         return {
           tool: 'codex',
-          remainingPercent: 100,
-          usedPercent: 0,
-          resetAt: null,
-          source: 'ccusage'
+          remainingPercent: 0,
+          usedPercent: 100,
+          resetAt,
+          source: 'official-cli',
         };
       }
 
-      // Sum today's cost
-      const totalCost = todaySessions.reduce((acc: number, s: any) => acc + (s.costUSD || 0.0), 0.0);
-      const usedPercent = (totalCost / this.budgetLimit) * 100;
-      
-      // Calculate remaining percentage
-      let remainingPercent = 100 - usedPercent;
-      if (usedPercent > 0 && remainingPercent > 99) {
-        // Micro-interaction: if they burned any credits, show 99% instead of rounding to 100%
-        remainingPercent = 99;
-      } else {
-        remainingPercent = Math.max(0, Math.min(100, Math.round(remainingPercent)));
-      }
+      // TUI loaded cleanly with no quota warning → estimate remaining via ccusage
+      const estimate = await fetchCcusageEstimate(this.budgetLimit);
+      return estimate;
 
-      // Calculate rolling 5-hour reset time based on the most recent session's activity
-      let resetAt: string | null = null;
-      const sortedSessions = [...todaySessions].sort(
-        (a: any, b: any) => new Date(b.lastActivity).getTime() - new Date(a.lastActivity).getTime()
-      );
-      const latestSession = sortedSessions[0];
-
-      if (latestSession && latestSession.lastActivity) {
-        try {
-          const lastActivityDate = new Date(latestSession.lastActivity);
-          // Roll forward 5 hours for the rolling limit window
-          const resetDate = new Date(lastActivityDate.getTime() + 5 * 60 * 60 * 1000);
-          resetAt = resetDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        } catch {
-          resetAt = null;
-        }
-      }
-
-      return {
-        tool: 'codex',
-        remainingPercent,
-        usedPercent: Math.round(usedPercent),
-        resetAt,
-        source: 'ccusage',
-        raw: { totalCost, todaySessionsCount: todaySessions.length }
-      };
-
-    } catch (error) {
-      return {
-        tool: 'codex',
-        remainingPercent: null,
-        usedPercent: null,
-        resetAt: null,
-        source: 'unknown',
-        raw: error instanceof Error ? error.message : String(error)
-      };
+    } catch {
+      // expect not available or codex spawn failed → fall back to ccusage estimate
+      return fetchCcusageEstimate(this.budgetLimit);
     }
   }
+}
+
+function localDateString(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
 }
