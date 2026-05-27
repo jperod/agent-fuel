@@ -21,8 +21,7 @@ export class CodexQuotaAdapter implements QuotaAdapter {
         const result = await execAsync('npx --no-install ccusage codex session --json');
         stdout = result.stdout;
       } catch {
-        const result = await execAsync('npx ccusage codex session --json');
-        stdout = result.stdout;
+        throw new Error('ccusage package is not installed or available locally. Please run "npm install -g ccusage" to use this tool.');
       }
 
       const data = JSON.parse(stdout);
@@ -33,10 +32,24 @@ export class CodexQuotaAdapter implements QuotaAdapter {
       }
 
       // Filter sessions for today's date in local time
-      const todayPrefix = new Date().toISOString().split('T')[0]; // Format: YYYY-MM-DD
+      const now = new Date();
+      const year = now.getFullYear();
+      const month = String(now.getMonth() + 1).padStart(2, '0');
+      const day = String(now.getDate()).padStart(2, '0');
+      const todayPrefix = `${year}-${month}-${day}`;
+
       const todaySessions = sessions.filter((s: any) => {
         if (!s.lastActivity) return false;
-        return s.lastActivity.startsWith(todayPrefix);
+        try {
+          const dateObj = new Date(s.lastActivity);
+          const sYear = dateObj.getFullYear();
+          const sMonth = String(dateObj.getMonth() + 1).padStart(2, '0');
+          const sDay = String(dateObj.getDate()).padStart(2, '0');
+          const sLocalDate = `${sYear}-${sMonth}-${sDay}`;
+          return sLocalDate === todayPrefix;
+        } catch {
+          return false;
+        }
       });
 
       if (todaySessions.length === 0) {

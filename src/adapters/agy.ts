@@ -1,4 +1,4 @@
-import fs from 'node:fs';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { QuotaAdapter, UsageSnapshot } from './index.js';
@@ -19,54 +19,67 @@ export class AgyQuotaAdapter implements QuotaAdapter {
       let activeModel = 'Gemini 3.5 Flash';
       
       // 1. Read active model from settings.json if it exists
-      if (fs.existsSync(settingsPath)) {
-        try {
-          const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
-          if (settings && settings.model) {
-            activeModel = settings.model;
-          }
-        } catch {
-          // Fallback to default model name if parsing settings failed
+      try {
+        const settingsContent = await fs.readFile(settingsPath, 'utf-8');
+        const settings = JSON.parse(settingsContent);
+        if (settings && settings.model) {
+          activeModel = settings.model;
         }
+      } catch {
+        // Fallback to default model name if reading or parsing settings failed
       }
 
       // 2. Read history.jsonl to detect active prompts today
       let todayPromptsCount = 0;
       let latestPromptTimestamp: number | null = null;
 
-      if (fs.existsSync(historyPath)) {
-        try {
-          const historyLines = fs.readFileSync(historyPath, 'utf-8').trim().split('\n');
-          const todayPrefix = new Date().toISOString().split('T')[0]; // Format: YYYY-MM-DD
-          
-          for (const line of historyLines) {
-            if (!line.trim()) continue;
-            const entry = JSON.parse(line);
-            if (entry && entry.timestamp) {
-              const entryDate = new Date(entry.timestamp).toISOString().split('T')[0];
-              if (entryDate === todayPrefix) {
-                todayPromptsCount++;
-                if (!latestPromptTimestamp || entry.timestamp > latestPromptTimestamp) {
-                  latestPromptTimestamp = entry.timestamp;
-                }
+      // Construct local todayPrefix in YYYY-MM-DD format (timezone aware)
+      const now = new Date();
+      const year = now.getFullYear();
+      const month = String(now.getMonth() + 1).padStart(2, '0');
+      const day = String(now.getDate()).padStart(2, '0');
+      const todayPrefix = `${year}-${month}-${day}`;
+
+      try {
+        const historyContent = await fs.readFile(historyPath, 'utf-8');
+        const historyLines = historyContent.trim().split('\n');
+        
+        for (const line of historyLines) {
+          if (!line.trim()) continue;
+          const entry = JSON.parse(line);
+          if (entry && entry.timestamp) {
+            // Get local date YYYY-MM-DD for the entry's timestamp
+            const entryDateObj = new Date(entry.timestamp);
+            const eYear = entryDateObj.getFullYear();
+            const eMonth = String(entryDateObj.getMonth() + 1).padStart(2, '0');
+            const eDay = String(entryDateObj.getDate()).padStart(2, '0');
+            const entryDate = `${eYear}-${eMonth}-${eDay}`;
+
+            if (entryDate === todayPrefix) {
+              todayPromptsCount++;
+              if (!latestPromptTimestamp || entry.timestamp > latestPromptTimestamp) {
+                latestPromptTimestamp = entry.timestamp;
               }
             }
           }
-        } catch {
-          // Fallback if parsing history failed
         }
+      } catch {
+        // Fallback if reading or parsing history failed (e.g. file doesn't exist)
       }
 
       // 3. Calculate remaining percent based on active usage and model tier
       // Support dynamic overrides using AGENT_FUEL_AGY_PERCENT environment variable
       let remainingPercent = 100;
+      const isProModel = activeModel.toLowerCase().includes('pro');
+      const limit = isProModel ? 3 : 5; // Pro models have a tighter limit of 3, Flash has 5
+      const costPerPrompt = 100 / limit;
+      const calculatedPercent = Math.max(0, Math.round(100 - (todayPromptsCount * costPerPrompt)));
+
       if (process.env.AGENT_FUEL_AGY_PERCENT) {
-        remainingPercent = Math.max(0, Math.min(100, Number(process.env.AGENT_FUEL_AGY_PERCENT)));
+        const envVal = Number(process.env.AGENT_FUEL_AGY_PERCENT);
+        remainingPercent = !isNaN(envVal) ? Math.max(0, Math.min(100, envVal)) : calculatedPercent;
       } else {
-        const isProModel = activeModel.toLowerCase().includes('pro');
-        const limit = isProModel ? 3 : 5; // Pro models have a tighter limit of 3, Flash has 5
-        const costPerPrompt = 100 / limit;
-        remainingPercent = Math.max(0, Math.round(100 - (todayPromptsCount * costPerPrompt)));
+        remainingPercent = calculatedPercent;
       }
 
       // 4. Calculate rolling reset time (5 hours rolling or resets in 4h 37m from latest prompt, giving ~01:30 PM resets)

@@ -21,8 +21,7 @@ export class ClaudeQuotaAdapter implements QuotaAdapter {
         const result = await execAsync('npx --no-install ccusage blocks --json');
         stdout = result.stdout;
       } catch {
-        const result = await execAsync('npx ccusage blocks --json');
-        stdout = result.stdout;
+        throw new Error('ccusage package is not installed or available locally. Please run "npm install -g ccusage" to use this tool.');
       }
 
       const data = JSON.parse(stdout);
