@@ -1,21 +1,78 @@
-import { exec } from 'node:child_process';
-import { promisify } from 'node:util';
 import { QuotaAdapter, UsageSnapshot } from './index.js';
+import { TuiScraper } from '../tmux.js';
+import { debug } from '../debug.js';
 
-const execAsync = promisify(exec);
+// ── TUI scraper ────────────────────────────────────────────────────────────
 
-// Budget limit for the rolling 5-hour billing window.
-// Override with AGENT_FUEL_CLAUDE_BUDGET env var (dollars).
-const DEFAULT_BUDGET_USD = 20.0;
+async function sleep(ms: number): Promise<void> {
+  return new Promise(res => setTimeout(res, ms));
+}
+
+/**
+ * Launches `claude` in a tmux session, opens /status, navigates to the
+ * Status tab (which shows real quota usage bars), and returns the captured
+ * screen text.
+ *
+ * The Status tab renders persistently (not transient), so regular
+ * capture-pane is sufficient — no pipe-pane needed.
+ */
+async function runClaudeScrape(): Promise<string> {
+  const tui = new TuiScraper('claude');
+  try {
+    tui.start();
+
+    // Wait for TUI ready — welcome banner or prompt hint visible
+    await tui.waitFor(/Welcome back|Try "/i, 15_000, 0);
+
+    // Open the /status panel
+    tui.send('/status');
+    // Wait for the status panel tabs to appear
+    await tui.waitFor(/Settings\s+Status/i, 10_000, 0);
+
+    // Navigate to the Status tab (second tab after Settings)
+    tui.sendKey('Tab');
+    await sleep(300);
+    tui.sendKey('Tab');
+
+    // Wait for the usage bars — shows "XX% used"
+    return await tui.waitFor(/\d+%\s+used/i, 8_000, 0);
+
+  } finally {
+    tui.kill();
+  }
+}
+
+// ── Parser ─────────────────────────────────────────────────────────────────
+
+interface ClaudeScrapeResult {
+  sessionUsedPct: number | null;
+  sessionResetAt: string | null;
+  weeklyUsedPct: number | null;
+}
+
+function parseScrapeOutput(screen: string): ClaudeScrapeResult {
+  debug('claude:parse', `screen length: ${screen.length}`);
+  debug('claude:parse', 'screen', screen);
+
+  // Match "XX% used" occurrences in order:
+  // First = current session (5h block), second = current week
+  const usedMatches = [...screen.matchAll(/(\d+)%\s+used/gi)];
+  debug('claude:parse', `found ${usedMatches.length} "% used" matches`);
+
+  const sessionUsedPct = usedMatches[0] ? parseInt(usedMatches[0][1], 10) : null;
+  const weeklyUsedPct  = usedMatches[1] ? parseInt(usedMatches[1][1], 10) : null;
+
+  // Reset time: "Resets H:MMam" or "Resets May 30 at 6am" — grab the first occurrence
+  const resetMatch = screen.match(/Resets\s+([^\n\r]+)/i);
+  const sessionResetAt = resetMatch ? resetMatch[1].trim() : null;
+
+  debug('claude:parse', 'result', { sessionUsedPct, sessionResetAt, weeklyUsedPct });
+  return { sessionUsedPct, sessionResetAt, weeklyUsedPct };
+}
+
+// ── Adapter ────────────────────────────────────────────────────────────────
 
 export class ClaudeQuotaAdapter implements QuotaAdapter {
-  private readonly budgetLimit: number;
-
-  constructor() {
-    const override = Number(process.env.AGENT_FUEL_CLAUDE_BUDGET);
-    this.budgetLimit = Number.isFinite(override) && override > 0 ? override : DEFAULT_BUDGET_USD;
-  }
-
   public async fetchSnapshots(): Promise<UsageSnapshot[]> {
     return [await this._fetch()];
   }
@@ -29,59 +86,29 @@ export class ClaudeQuotaAdapter implements QuotaAdapter {
       source: 'unknown',
     });
 
+    debug('claude:fetch', 'starting TUI scrape via tmux');
     try {
-      let stdout: string;
-      try {
-        ({ stdout } = await execAsync('npx --no-install ccusage blocks --json'));
-      } catch {
-        throw new Error(
-          'ccusage not found. Run "npm install -g ccusage" to enable Claude Code tracking.',
-        );
+      const screen = await runClaudeScrape();
+      const result = parseScrapeOutput(screen);
+
+      if (result.sessionUsedPct !== null) {
+        const remainingPercent = Math.max(0, 100 - result.sessionUsedPct);
+        debug('claude:fetch', `parsed Usage tab → ${result.sessionUsedPct}% used (${remainingPercent}% remaining)`);
+        return {
+          tool: 'claude-code',
+          remainingPercent,
+          usedPercent: result.sessionUsedPct,
+          resetAt: result.sessionResetAt,
+          source: 'official-cli',
+        };
       }
 
-      const data = JSON.parse(stdout);
-      const blocks: unknown[] = Array.isArray(data?.blocks) ? data.blocks : data;
+      debug('claude:fetch', 'parse failed → unknown');
+      return unknown();
 
-      if (!Array.isArray(blocks)) {
-        throw new Error('Unexpected JSON shape from ccusage blocks.');
-      }
-
-      const activeBlock = (blocks as Record<string, unknown>[]).find(
-        (b) => b.isActive === true,
-      );
-
-      if (!activeBlock) return unknown();
-
-      const cost = typeof activeBlock.costUSD === 'number' ? activeBlock.costUSD : 0;
-      const usedPct = (cost / this.budgetLimit) * 100;
-      const remainingPercent = Math.max(0, Math.min(100, Math.round(100 - usedPct)));
-
-      let resetAt: string | null = null;
-      if (typeof activeBlock.endTime === 'string') {
-        try {
-          resetAt = new Date(activeBlock.endTime).toLocaleTimeString([], {
-            hour: '2-digit',
-            minute: '2-digit',
-          });
-        } catch {
-          resetAt = activeBlock.endTime;
-        }
-      }
-
-      return {
-        tool: 'claude-code',
-        remainingPercent,
-        usedPercent: Math.round(usedPct),
-        resetAt,
-        source: 'ccusage',
-        raw: activeBlock,
-      };
-
-    } catch (error) {
-      return {
-        ...unknown(),
-        raw: error instanceof Error ? error.message : String(error),
-      };
+    } catch (err) {
+      debug('claude:fetch', 'caught error', String(err));
+      return unknown();
     }
   }
 }

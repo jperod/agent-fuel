@@ -64,9 +64,7 @@ function formatResetAt(resetAt: string): string {
 }
 
 function isEstimate(snap: UsageSnapshot): boolean {
-  return snap.source === 'ccusage' &&
-    typeof snap.raw === 'object' && snap.raw !== null &&
-    (snap.raw as Record<string, unknown>).isEstimate === true;
+  return snap.source === 'ccusage';
 }
 
 // ── Core format (returns string, no newline) ───────────────────────────────
@@ -101,7 +99,7 @@ export function formatRow(snap: UsageSnapshot): string {
     }
   }
 
-  if (snap.tool === 'codex' && isEstimate(snap)) {
+  if (isEstimate(snap)) {
     parts.push(`${DIM}${GRAY}[~est]${R}`);
   }
 
