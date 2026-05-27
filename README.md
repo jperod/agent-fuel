@@ -4,6 +4,22 @@ A sleek, unified CLI dashboard to monitor your AI coding assistant quotas, credi
 
 ---
 
+## 🚀 Quick Start
+
+Get **Agent Fuel** installed, globally linked, and running on your system with a single one-liner command:
+
+```bash
+npm install && npm run build && npm link && agent-fuel
+```
+
+Once globally linked, you can run the dashboard at any time from **any directory** on your machine by simply typing:
+
+```bash
+agent-fuel
+```
+
+---
+
 ## 💡 The Motivation
 
 AI coding assistants are now integral to developer workflows. Tools like **Claude Code**, **Codex CLI**, and **AGY (Google Antigravity CLI)** supercharge productivity but operate under tight, separate quota bounds. Whether it is a daily dollar limit, token ceilings, or monthly credits, developers are forced to jump through interactive prompts or scrape configuration screens just to answer a simple question:
@@ -64,22 +80,6 @@ Running `agent-fuel` will immediately output a clean, colored visual summary of 
 Codex        [░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] unknown
 Claude Code  [██████████████████████████░░░░]  86% remaining (resets 01:00 PM)
 AGY          [░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] unknown
-```
-
----
-
-## 🚀 Quick Start
-
-Get **Agent Fuel** installed, globally linked, and running on your system with a single one-liner command:
-
-```bash
-npm install && npm run build && npm link && agent-fuel
-```
-
-Once globally linked, you can run the dashboard at any time from **any directory** on your machine by simply typing:
-
-```bash
-agent-fuel
 ```
 
 
