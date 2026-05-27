@@ -56,13 +56,30 @@ type UsageSnapshot = {
 
 ## 📊 Terminal Dashboard Preview
 
-Running `agent-fuel` will immediately output a clean visual summary of your current agent capacity:
+Running `agent-fuel` will immediately output a clean, colored visual summary of your current agent capacity:
 
 ```text
-AI Coding CLI Usage
+⚡️ Agent Fuel - CLI Quota Monitor
 
-Codex        [██████████████████░░░░░░░░░░░░]  62% remaining
-Claude Code  [████████░░░░░░░░░░░░░░░░░░░░░░]  28% remaining
-AGY          [████████████████████████░░░░░░]  82% remaining
+Codex        [░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] unknown
+Claude Code  [██████████████████████████░░░░]  86% remaining (resets 01:00 PM)
+AGY          [░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] unknown
 ```
+
+---
+
+## 🚀 Quick Start
+
+Get **Agent Fuel** installed, globally linked, and running on your system with a single one-liner command:
+
+```bash
+npm install && npm run build && npm link && agent-fuel
+```
+
+Once globally linked, you can run the dashboard at any time from **any directory** on your machine by simply typing:
+
+```bash
+agent-fuel
+```
+
 
