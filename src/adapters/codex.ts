@@ -2,7 +2,7 @@ import { exec, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readFileSync, unlinkSync } from 'node:fs';
 import { QuotaAdapter, UsageSnapshot } from './index.js';
-import { TuiScraper } from '../tmux.js';
+import { TuiScraper, sleep } from '../tmux.js';
 import { debug } from '../debug.js';
 
 const execAsync = promisify(exec);
@@ -15,9 +15,14 @@ const ROLLING_WINDOW_MS = 5 * 60 * 60 * 1000;
 
 // ── TUI scraper (tmux) ─────────────────────────────────────────────────────
 
-async function sleep(ms: number): Promise<void> {
-  return new Promise(res => setTimeout(res, ms));
-}
+// Codex may show one or more blocking dialogs before its main screen ("Tip:").
+// Known dialogs and their dismissal key ("2" = skip/use existing):
+//   • Update nag:      "Update available! x.x → y.y"
+//   • New-model intro: "Introducing GPT-5.5"
+const CODEX_READY  = /Tip:/i;
+const CODEX_DIALOG = /Update available|Introducing GPT|Try new model|Use existing model/i;
+const CODEX_EITHER = new RegExp(`(?:${CODEX_READY.source})|(?:${CODEX_DIALOG.source})`, 'i');
+const CODEX_STARTUP_MS = 25_000;
 
 /**
  * Launches `codex` in a tmux session, pipes all terminal bytes to a temp
@@ -39,8 +44,20 @@ async function runCodexScrape(): Promise<string> {
     execFileSync('tmux', ['pipe-pane', '-t', tui.sessionId, `cat >> '${pipePath}'`]);
     debug('codex:scrape', `pipe-pane logging to ${pipePath}`);
 
-    // Wait for TUI ready: current screen (historyLines=0) shows Tip, meaning MCP boot done
-    await tui.waitFor(/Tip:/i, 20_000, 0);
+    // Wait for TUI ready, dismissing any blocking dialogs along the way.
+    const dialogDeadline = Date.now() + CODEX_STARTUP_MS;
+    let screen = await tui.waitFor(CODEX_EITHER, CODEX_STARTUP_MS, 0);
+
+    while (!CODEX_READY.test(screen)) {
+      debug('codex:scrape', 'blocking dialog detected — sending "2" to dismiss');
+      tui.send('2');
+      await sleep(1_000); // wait for dialog to actually clear before re-checking
+      const remaining = dialogDeadline - Date.now(); // compute AFTER sleep
+      if (remaining < 500) {
+        throw new Error('Codex TUI never reached ready state after dismissing dialogs');
+      }
+      screen = await tui.waitFor(CODEX_EITHER, remaining, 0);
+    }
 
     // First /status: panel says "Limits: refresh requested; run /status again shortly"
     tui.send('/status');
@@ -186,7 +203,7 @@ async function fetchCcusageEstimate(budgetLimit: number): Promise<UsageSnapshot>
     if (latestActivity > 0) {
       try {
         resetAt = new Date(latestActivity + ROLLING_WINDOW_MS).toLocaleTimeString([], {
-          hour: '2-digit', minute: '2-digit',
+          hour: '2-digit', minute: '2-digit', hour12: false,
         });
       } catch { /* leave null */ }
     }

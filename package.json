@@ -1,6 +1,6 @@
 {
   "name": "agent-fuel",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Sleek term-based dashboard for AI coding CLI quotas",
   "type": "module",
   "main": "dist/index.js",
@@ -28,7 +28,7 @@
   "author": "Pedro Rodrigues",
   "license": "MIT",
   "devDependencies": {
-    "@types/node": "^20.11.24",
-    "typescript": "^5.3.3"
+    "@types/node": "^25.9.1",
+    "typescript": "^6.0.3"
   }
 }
