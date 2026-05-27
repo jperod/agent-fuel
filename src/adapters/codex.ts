@@ -1,89 +1,131 @@
-import { exec, spawn } from 'node:child_process';
+import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
+import { readFileSync, unlinkSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { QuotaAdapter, UsageSnapshot } from './index.js';
+import { TuiScraper } from '../tmux.js';
+import { debug } from '../debug.js';
 
 const execAsync = promisify(exec);
 
 // Used ONLY as a rough fallback estimate when the TUI scrape cannot determine
-// a percentage (i.e. quota has not yet been reached). This is a GUESS based on
-// local session cost data — not an official Codex quota signal.
-// Override with AGENT_FUEL_CODEX_BUDGET env var (dollars).
+// a percentage. This is a GUESS based on local session cost data — not an
+// official Codex quota signal. Override with AGENT_FUEL_CODEX_BUDGET env var.
 const DEFAULT_BUDGET_USD = 20.0;
 const ROLLING_WINDOW_MS = 5 * 60 * 60 * 1000;
 
-// ── TUI scraper (expect) ───────────────────────────────────────────────────
+// ── TUI scraper (tmux) ─────────────────────────────────────────────────────
+
+async function sleep(ms: number): Promise<void> {
+  return new Promise(res => setTimeout(res, ms));
+}
 
 /**
- * Spawns `codex` via `expect`, handles the trust prompt, waits for the TUI to
- * settle, then captures stdout/stderr to check for the quota-reached warning.
+ * Launches `codex` in a tmux session, pipes all terminal bytes to a temp
+ * file, sends /status twice, then reads the file and returns the raw bytes.
+ *
+ * Why pipe-pane instead of capture-pane:
+ * The /status overlay is full-screen and transient — it renders in-place for
+ * one frame and re-renders away without entering the tmux scrollback buffer.
+ * capture-pane (even with -S history) can never catch it. pipe-pane streams
+ * every raw byte to a file so even a 10ms overlay is permanently recorded.
  */
-function runCodexScrape(): Promise<string> {
-  return new Promise((resolve) => {
-    const expectScript = [
-      'set timeout 15',
-      'spawn codex',
-      'expect {',
-      '  -re "Press enter to continue" { send "\\r"; exp_continue }',
-      '  -re "Individual quota reached" { after 300; send "\\x03" }',
-      '  -re "for shortcuts" { after 300; send "\\x03" }',
-      '  timeout { }',
-      '  eof { }',
-      '}',
-      'expect eof',
-    ].join('\n');
+async function runCodexScrape(): Promise<string> {
+  const tui = new TuiScraper('codex');
+  const pipePath = `/tmp/af-codex-${Date.now()}.log`;
+  try {
+    tui.start();
 
-    const MAX_OUTPUT_BYTES = 64 * 1024;
-    let output = '';
+    // Stream all pane output to a file from the start
+    execFileSync('tmux', ['pipe-pane', '-t', tui.sessionId, `cat >> ${pipePath}`]);
+    debug('codex:scrape', `pipe-pane logging to ${pipePath}`);
 
-    const child = spawn('expect', ['-c', expectScript], {
-      env: { ...process.env },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    // Wait for TUI ready: current screen (historyLines=0) shows Tip, meaning MCP boot done
+    await tui.waitFor(/Tip:/i, 20_000, 0);
 
-    const append = (chunk: Buffer): void => {
-      if (output.length < MAX_OUTPUT_BYTES) output += chunk.toString();
-    };
-    child.stdout.on('data', append);
-    child.stderr.on('data', append);
+    // First /status: panel says "Limits: refresh requested; run /status again shortly"
+    tui.send('/status');
+    await sleep(2_000);
 
-    const timer = setTimeout(() => { child.kill('SIGKILL'); resolve(output); }, 20_000);
-    child.on('close', () => { clearTimeout(timer); resolve(output); });
-  });
+    // Second /status: has actual 5h/weekly quota data
+    tui.send('/status');
+    await sleep(4_000);
+
+    const raw = readFileSync(pipePath, 'utf-8');
+    debug('codex:scrape', `pipe log size: ${raw.length} bytes`);
+    return raw;
+
+  } finally {
+    tui.kill();
+    try { unlinkSync(pipePath); } catch { /* ok */ }
+  }
 }
 
 // ── Output parser ──────────────────────────────────────────────────────────
 
-function stripAnsi(str: string): string {
-  // eslint-disable-next-line no-control-regex
-  return str.replace(/\x1B\[[0-9;]*[A-Za-z]|\x1B[^[]/g, '').replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '');
-}
-
 interface CodexScrapeResult {
   quotaReached: boolean;
-  resetIn: string | null; // e.g. "4h 33m"
+  resetIn: string | null;
+  fiveHourRemainingPct: number | null;
+  fiveHourResetAt: string | null;
+}
+
+function stripAnsi(str: string): string {
+  // eslint-disable-next-line no-control-regex
+  return str
+    .replace(/\x1B\[[\x20-\x3f]*[\x40-\x7e]/g, '')
+    .replace(/\x1B[^[]/g, '')
+    .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '');
 }
 
 function parseScrapeOutput(raw: string): CodexScrapeResult {
+  // pipe-pane output contains raw ANSI bytes — strip before pattern matching
   const clean = stripAnsi(raw);
+  debug('codex:parse', `raw length: ${raw.length}, cleaned length: ${clean.length}`);
+  debug('codex:parse', 'cleaned output', clean);
+  debug('codex:parse', 'checking patterns', {
+    hasIndividualQuota: /Individual quota reached/i.test(clean),
+    hasHeadsUp: /less than \d+%\s+of your 5h limit left/i.test(clean),
+    has5hLimit: /5h limit:/i.test(clean),
+    hasWeeklyLimit: /Weekly limit:/i.test(clean),
+    hasLimits: /Limits:/i.test(clean),
+  });
 
   // "Individual quota reached. Contact your administrator to enable overages. Resets in 4h33m29s."
-  const quotaMatch = clean.match(/Individual quota reached/i);
-  if (!quotaMatch) return { quotaReached: false, resetIn: null };
-
-  // Parse "Resets in 4h33m29s" → "4h 33m"
-  const resetMatch = clean.match(/Resets in\s*((?:\d+h)?(?:\d+m)?(?:\d+s)?)/i);
-  let resetIn: string | null = null;
-  if (resetMatch) {
-    const parts: string[] = [];
-    const hm = resetMatch[1].match(/^(\d+h)?(\d+m)?/);
-    if (hm) {
-      if (hm[1]) parts.push(hm[1]);
-      if (hm[2]) parts.push(hm[2]);
+  if (/Individual quota reached/i.test(clean)) {
+    const resetMatch = clean.match(/Resets in\s*((?:\d+h)?(?:\d+m)?(?:\d+s)?)/i);
+    let resetIn: string | null = null;
+    if (resetMatch) {
+      const parts: string[] = [];
+      const hm = resetMatch[1].match(/^(\d+h)?(\d+m)?/);
+      if (hm) {
+        if (hm[1]) parts.push(hm[1]);
+        if (hm[2]) parts.push(hm[2]);
+      }
+      resetIn = parts.length > 0 ? parts.join(' ') : null;
     }
-    resetIn = parts.length > 0 ? parts.join(' ') : null;
+    debug('codex:parse', 'result', { quotaReached: true, resetIn });
+    return { quotaReached: true, resetIn, fiveHourRemainingPct: null, fiveHourResetAt: null };
   }
 
-  return { quotaReached: true, resetIn };
+  // "⚠ Heads up, you have less than X% of your 5h limit left."
+  const headsUpMatch = clean.match(/less than (\d+)%\s+of your 5h limit left/i);
+  if (headsUpMatch) {
+    const ceiling = parseInt(headsUpMatch[1], 10);
+    const fiveHourRemainingPct = Math.max(0, ceiling - 1);
+    debug('codex:parse', 'result', { source: 'headsUp', ceiling, fiveHourRemainingPct });
+    return { quotaReached: false, resetIn: null, fiveHourRemainingPct, fiveHourResetAt: null };
+  }
+
+  // Parse "/status" panel: "5h limit: [...] X% left (resets HH:MM)"
+  // Use the LAST match — /status is sent twice and the second response is fresh.
+  const allFiveHMatches = [...clean.matchAll(/5h limit:\s*\[.*?\]\s*(\d+)%\s*left\s*\(resets\s+([^)]+)\)/gi)];
+  const fiveHMatch = allFiveHMatches.at(-1) ?? null;
+  const fiveHourRemainingPct = fiveHMatch ? parseInt(fiveHMatch[1], 10) : null;
+  const fiveHourResetAt = fiveHMatch ? fiveHMatch[2].trim() : null;
+
+  debug('codex:parse', 'result', { quotaReached: false, fiveHourRemainingPct, fiveHourResetAt, fiveHMatchRaw: fiveHMatch?.[0] ?? null });
+  return { quotaReached: false, resetIn: null, fiveHourRemainingPct, fiveHourResetAt };
 }
 
 // ── ccusage fallback estimate ──────────────────────────────────────────────
@@ -105,6 +147,7 @@ async function fetchCcusageEstimate(budgetLimit: number): Promise<UsageSnapshot>
       return unknown();
     }
 
+    debug('codex:ccusage', 'raw stdout', stdout);
     const data = JSON.parse(stdout);
     const sessions: unknown[] =
       Array.isArray(data?.sessions) ? data.sessions :
@@ -149,6 +192,14 @@ async function fetchCcusageEstimate(budgetLimit: number): Promise<UsageSnapshot>
       } catch { /* leave null */ }
     }
 
+    debug('codex:ccusage', 'computed', {
+      totalCost,
+      todaySessionsCount: todaySessions.length,
+      budgetLimit,
+      usedPct,
+      remainingPercent,
+      resetAt,
+    });
     return {
       tool: 'codex',
       remainingPercent,
@@ -177,14 +228,14 @@ export class CodexQuotaAdapter implements QuotaAdapter {
   }
 
   private async _fetch(): Promise<UsageSnapshot> {
-    // Primary: scrape the Codex TUI via expect
+    debug('codex:fetch', 'starting TUI scrape via tmux');
     try {
       const raw = await runCodexScrape();
       const result = parseScrapeOutput(raw);
 
       if (result.quotaReached) {
-        // Ground truth: quota is exhausted
         const resetAt = result.resetIn ? `Resets in ${result.resetIn}` : null;
+        debug('codex:fetch', 'quota reached → returning 0%');
         return {
           tool: 'codex',
           remainingPercent: 0,
@@ -194,12 +245,22 @@ export class CodexQuotaAdapter implements QuotaAdapter {
         };
       }
 
-      // TUI loaded cleanly with no quota warning → estimate remaining via ccusage
-      const estimate = await fetchCcusageEstimate(this.budgetLimit);
-      return estimate;
+      if (result.fiveHourRemainingPct !== null) {
+        debug('codex:fetch', `parsed /status → ${result.fiveHourRemainingPct}% remaining`);
+        return {
+          tool: 'codex',
+          remainingPercent: result.fiveHourRemainingPct,
+          usedPercent: 100 - result.fiveHourRemainingPct,
+          resetAt: result.fiveHourResetAt,
+          source: 'official-cli',
+        };
+      }
 
-    } catch {
-      // expect not available or codex spawn failed → fall back to ccusage estimate
+      debug('codex:fetch', '/status parse failed → falling back to ccusage estimate');
+      return fetchCcusageEstimate(this.budgetLimit);
+
+    } catch (err) {
+      debug('codex:fetch', 'caught error, falling back to ccusage', String(err));
       return fetchCcusageEstimate(this.budgetLimit);
     }
   }

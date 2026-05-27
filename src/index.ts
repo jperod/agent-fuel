@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { debugEnabled, debugLogFile } from './debug.js';
 import { ClaudeQuotaAdapter } from './adapters/claude.js';
 import { CodexQuotaAdapter } from './adapters/codex.js';
 import { AgyQuotaAdapter } from './adapters/agy.js';
@@ -10,22 +11,28 @@ import { printHeader, printFooter, formatRow, getDisplayName, LOADING_LINE } fro
 const SLOT_ORDER = ['claude-code', 'codex', 'agy-gemini', 'agy-other'] as const;
 type SlotTool = typeof SLOT_ORDER[number];
 
-const BOLD = '\x1b[1m';
-const R    = '\x1b[0m';
+const BOLD  = '\x1b[1m';
+const R     = '\x1b[0m';
+const isTTY = Boolean(process.stdout.isTTY);
 
-const N = SLOT_ORDER.length;
-
-// Redraws all N slot lines from the current cursor position (cursor must be
-// just below the last slot line when called).
+// In TTY mode: restore cursor to saved position and repaint all slots.
+// In pipe mode: just emit each newly-resolved line once (no cursor tricks).
 function redraw(slots: Map<SlotTool, string | null>): void {
-  process.stdout.write(`\x1b[${N}A`); // cursor up N lines
+  if (!isTTY) {
+    for (const tool of SLOT_ORDER) {
+      const line = slots.get(tool);
+      if (line != null) process.stdout.write(line + '\n');
+    }
+    return;
+  }
+  process.stdout.write('\x1b8'); // DEC restore-cursor — teleports back to saved position
   for (const tool of SLOT_ORDER) {
-    process.stdout.write('\x1b[2K\r'); // clear line
+    process.stdout.write('\x1b[2K\r');
     const line = slots.get(tool);
     if (line != null) {
-      process.stdout.write(line + '\n');
+      process.stdout.write(line + '\x1b[K\n');
     } else {
-      process.stdout.write(`${BOLD}${getDisplayName(tool).padEnd(13)}${R} ${LOADING_LINE}\n`);
+      process.stdout.write(`${BOLD}${getDisplayName(tool).padEnd(13)}${R} ${LOADING_LINE}\x1b[K\n`);
     }
   }
 }
@@ -35,10 +42,12 @@ async function main(): Promise<void> {
   const codexAdapter  = new CodexQuotaAdapter();
   const agyAdapter    = new AgyQuotaAdapter();
 
+  if (debugEnabled) process.stderr.write(`\x1b[2m[debug] logging to ${debugLogFile}\x1b[0m\n`);
   printHeader();
 
-  // Print placeholder rows in fixed order
+  // Save cursor before the placeholder rows so redraw() can teleport back and overwrite them
   const slots = new Map<SlotTool, string | null>(SLOT_ORDER.map(t => [t, null]));
+  if (isTTY) process.stdout.write('\x1b7'); // DEC save-cursor
   for (const tool of SLOT_ORDER) {
     process.stdout.write(`${BOLD}${getDisplayName(tool).padEnd(13)}${R} ${LOADING_LINE}\n`);
   }
