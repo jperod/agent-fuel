@@ -1,8 +1,11 @@
 import { exec, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readFileSync, unlinkSync } from 'node:fs';
+import { readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import crypto from 'node:crypto';
+import path from 'node:path';
 import { QuotaAdapter, UsageSnapshot } from './index.js';
-import { TuiScraper, sleep } from '../tmux.js';
+import { TuiScraper, sleep, registerTempFile, unregisterTempFile } from '../tmux.js';
 import { debug } from '../debug.js';
 
 const execAsync = promisify(exec);
@@ -22,7 +25,10 @@ const ROLLING_WINDOW_MS = 5 * 60 * 60 * 1000;
 const CODEX_READY  = /Tip:/i;
 const CODEX_DIALOG = /Update available|Introducing GPT|Try new model|Use existing model/i;
 const CODEX_EITHER = new RegExp(`(?:${CODEX_READY.source})|(?:${CODEX_DIALOG.source})`, 'i');
-const CODEX_STARTUP_MS = 25_000;
+const CODEX_STARTUP_MS          = 25_000;
+const CODEX_DIALOG_SETTLE_MS    =  1_000; // wait for UI to re-render after dismissing a dialog
+const CODEX_STATUS_REFRESH_MS   =  2_000; // first /status just triggers a quota refresh
+const CODEX_STATUS_READY_MS     =  4_000; // second /status carries the live quota data
 
 /**
  * Launches `codex` in a tmux session, pipes all terminal bytes to a temp
@@ -36,12 +42,25 @@ const CODEX_STARTUP_MS = 25_000;
  */
 async function runCodexScrape(): Promise<string> {
   const tui = new TuiScraper('codex');
-  const pipePath = `/tmp/af-codex-${Date.now()}.log`;
+  
+  const tmpDir = os.tmpdir();
+  const randomSuffix = crypto.randomBytes(6).toString('hex');
+  const pipePath = path.join(tmpDir, `af-codex-${Date.now()}-${randomSuffix}.log`);
+  
+  registerTempFile(pipePath);
+  // Create the file with restricted permissions before tmux starts writing to it
+  writeFileSync(pipePath, '', { mode: 0o600 });
   try {
     tui.start();
 
-    // Stream all pane output to a file from the start
-    execFileSync('tmux', ['pipe-pane', '-t', tui.sessionId, `cat >> '${pipePath}'`]);
+    // Stream all pane output to a file from the start.
+    // Single-quote escaping: safe against all shell metacharacters ($, `, \, space, etc.)
+    // Note: pipe-pane executes this command via tmux's `default-shell` (defaults to /bin/sh).
+    // If the user has set default-shell to a non-POSIX shell (e.g. fish), the `'\\''` idiom
+    // will fail — but pipePath is constructed from os.tmpdir() + hex, so single quotes
+    // cannot appear in practice, making the replace a no-op and the quoting sh-compatible.
+    const shellSafePath = "'" + pipePath.replace(/'/g, "'\\''") + "'";
+    execFileSync('tmux', ['pipe-pane', '-t', tui.sessionId, `cat >> ${shellSafePath}`]);
     debug('codex:scrape', `pipe-pane logging to ${pipePath}`);
 
     // Wait for TUI ready, dismissing any blocking dialogs along the way.
@@ -51,7 +70,7 @@ async function runCodexScrape(): Promise<string> {
     while (!CODEX_READY.test(screen)) {
       debug('codex:scrape', 'blocking dialog detected — sending "2" to dismiss');
       tui.send('2');
-      await sleep(1_000); // wait for dialog to actually clear before re-checking
+      await sleep(CODEX_DIALOG_SETTLE_MS);
       const remaining = dialogDeadline - Date.now(); // compute AFTER sleep
       if (remaining < 500) {
         throw new Error('Codex TUI never reached ready state after dismissing dialogs');
@@ -61,19 +80,20 @@ async function runCodexScrape(): Promise<string> {
 
     // First /status: panel says "Limits: refresh requested; run /status again shortly"
     tui.send('/status');
-    await sleep(2_000);
+    await sleep(CODEX_STATUS_REFRESH_MS);
 
     // Second /status: has actual 5h/weekly quota data
     tui.send('/status');
-    await sleep(4_000);
+    await sleep(CODEX_STATUS_READY_MS);
 
     const raw = readFileSync(pipePath, 'utf-8');
     debug('codex:scrape', `pipe log size: ${raw.length} bytes`);
     return raw;
 
   } finally {
-    tui.kill();
-    try { unlinkSync(pipePath); } catch { /* ok */ }
+    try { tui.kill(); } catch { /* already dead */ }
+    unregisterTempFile(pipePath); // always remove from registry, regardless of unlink success
+    try { unlinkSync(pipePath); } catch { /* ok if already gone */ }
   }
 }
 
@@ -159,7 +179,8 @@ async function fetchCcusageEstimate(budgetLimit: number): Promise<UsageSnapshot>
     let stdout: string;
     try {
       ({ stdout } = await execAsync('npx --no-install ccusage codex session --json'));
-    } catch {
+    } catch (err) {
+      debug('codex:ccusage', 'ccusage exec failed', String(err));
       return unknown();
     }
 
@@ -224,7 +245,8 @@ async function fetchCcusageEstimate(budgetLimit: number): Promise<UsageSnapshot>
       source: 'ccusage',
       raw: { totalCost, todaySessionsCount: todaySessions.length, isEstimate: true },
     };
-  } catch {
+  } catch (err) {
+    debug('codex:ccusage', 'unexpected error in ccusage fallback', String(err));
     return unknown();
   }
 }
