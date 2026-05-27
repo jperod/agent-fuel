@@ -54,8 +54,9 @@ async function runCodexScrape(): Promise<string> {
     tui.start();
 
     // Stream all pane output to a file from the start.
-    // JSON.stringify gives a double-quoted, shell-safe string even if TMPDIR contains spaces.
-    execFileSync('tmux', ['pipe-pane', '-t', tui.sessionId, `cat >> ${JSON.stringify(pipePath)}`]);
+    // Single-quote escaping: safe against all shell metacharacters ($, `, \, space, etc.)
+    const shellSafePath = "'" + pipePath.replace(/'/g, "'\\''") + "'";
+    execFileSync('tmux', ['pipe-pane', '-t', tui.sessionId, `cat >> ${shellSafePath}`]);
     debug('codex:scrape', `pipe-pane logging to ${pipePath}`);
 
     // Wait for TUI ready, dismissing any blocking dialogs along the way.

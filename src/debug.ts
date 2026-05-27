@@ -6,24 +6,28 @@ const MAX_DEBUG_LOGS = 10;
 
 function pruneOldLogs(dir: string): void {
   try {
-    const files = readdirSync(dir)
-      .filter(f => f.startsWith('debug-') && f.endsWith('.log'))
-      .map(f => ({
-        path: join(dir, f),
-        time: statSync(join(dir, f)).mtimeMs
-      }));
+    // Count first — stat only if pruning is actually needed.
+    // Use MAX_DEBUG_LOGS - 1 to reserve a slot for the new log file that is
+    // created after this call, so the total on disk never exceeds MAX_DEBUG_LOGS.
+    const names = readdirSync(dir)
+      .filter(f => f.startsWith('debug-') && f.endsWith('.log'));
 
-    if (files.length <= MAX_DEBUG_LOGS) return;
+    if (names.length < MAX_DEBUG_LOGS) return;
+
+    const files = names.map(f => {
+      const p = join(dir, f);
+      return { path: p, time: statSync(p).mtimeMs };
+    });
 
     // Sort by modification time, oldest first
     files.sort((a, b) => a.time - b.time);
 
-    const toDeleteCount = files.length - MAX_DEBUG_LOGS;
+    const toDeleteCount = files.length - (MAX_DEBUG_LOGS - 1);
     for (let i = 0; i < toDeleteCount; i++) {
       try {
         unlinkSync(files[i].path);
       } catch {
-        // ignore individual deletions if they fail
+        // ignore individual deletion failures
       }
     }
   } catch {
