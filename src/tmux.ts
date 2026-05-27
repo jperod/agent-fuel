@@ -133,7 +133,7 @@ export class TuiScraper {
     try {
       execFileSync('tmux', ['kill-session', '-t', this.sessionId], { stdio: 'ignore', timeout: 3000 });
     } catch { /* already dead */ }
-    activeScrapers.delete(this); // delete after kill attempt so cleanupAll() can retry on timeout
+    activeScrapers.delete(this); // delete after kill attempt so a concurrent signal doesn't see a half-killed scraper
   }
 }
 
