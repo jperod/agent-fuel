@@ -26,12 +26,15 @@ function spinnerLine(tool: SlotTool): string {
 }
 
 // In TTY mode: restore cursor to saved position and repaint all slots.
-// In pipe mode: emit each newly-resolved line once (no cursor tricks).
-function redraw(slots: Map<SlotTool, string | null>): void {
+// In pipe mode: emit each newly-resolved line exactly once (tracked via emitted set).
+function redraw(slots: Map<SlotTool, string | null>, emitted: Set<SlotTool>): void {
   if (!isTTY) {
     for (const tool of SLOT_ORDER) {
       const line = slots.get(tool);
-      if (line != null) process.stdout.write(line + '\n');
+      if (line != null && !emitted.has(tool)) {
+        process.stdout.write(line + '\n');
+        emitted.add(tool);
+      }
     }
     return;
   }
@@ -52,7 +55,8 @@ async function main(): Promise<void> {
   printHeader();
 
   // Save cursor before the placeholder rows so redraw() can teleport back and overwrite them
-  const slots = new Map<SlotTool, string | null>(SLOT_ORDER.map(t => [t, null]));
+  const slots   = new Map<SlotTool, string | null>(SLOT_ORDER.map(t => [t, null]));
+  const emitted = new Set<SlotTool>(); // pipe-mode: tracks which lines have been printed
   if (isTTY) process.stdout.write('\x1b7'); // DEC save-cursor
   for (const tool of SLOT_ORDER) {
     process.stdout.write(spinnerLine(tool) + '\n');
@@ -60,7 +64,7 @@ async function main(): Promise<void> {
 
   // Animate spinner at 80ms while any slot is still loading
   const spinnerTimer = isTTY
-    ? setInterval(() => { spinnerTick++; redraw(slots); }, 80)
+    ? setInterval(() => { spinnerTick++; redraw(slots, emitted); }, 80)
     : null;
 
   // Each adapter fills its slot(s) and triggers a redraw; order is always fixed
@@ -70,7 +74,7 @@ async function main(): Promise<void> {
         slots.set(snap.tool as SlotTool, formatRow(snap));
       }
     }
-    redraw(slots);
+    redraw(slots, emitted);
   }
 
   await Promise.allSettled([
@@ -80,7 +84,7 @@ async function main(): Promise<void> {
   ]);
 
   if (spinnerTimer) clearInterval(spinnerTimer);
-  redraw(slots); // final clean repaint with all data
+  redraw(slots, emitted); // final clean repaint with all data
   printFooter();
 }
 
