@@ -86,12 +86,12 @@ type UsageSnapshot = {
 ```
 ⚡️ Agent Fuel - CLI Quota Monitor
 
-Claude Code   [███████████████████░░░░░░░░░░░]  64% remaining (resets 01:00 PM)
-Codex         [░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░]   0% remaining (resets in 4h 33m)
-AGY Gemini    [░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░]   0% remaining (resets in 3h 16m) [Gemini 3.5 Flash (Medium)]
-AGY Other     [██████████████████░░░░░░░░░░░░]  60% remaining (resets in 4h 47m) [Claude Sonnet 4.6 (Thinking)]
+Claude Code   [██████████████████████░░░░░░░░]  72% remaining (resets 23:10 (Europe/Copenhagen))
+Codex         [█████████████████████░░░░░░░░░]  69% remaining (resets 23:37)
+AGY Gemini    [██████████████████████████████] 100% remaining ✓ quota available [Gemini 3.5 Flash (Medium)]
+AGY Other     [████████████░░░░░░░░░░░░░░░░░░]  40% remaining (resets in 122h 53m) [Claude Sonnet 4.6 (Thinking)]
 
-agent-fuel v0.3.0
+agent-fuel v0.x.y
 ```
 
 Rows appear as each adapter resolves — Claude Code (instant) prints first, Codex and AGY follow as their TUI scrapes complete.
@@ -111,18 +111,3 @@ Rows appear as each adapter resolves — Claude Code (instant) prints first, Cod
 
 > **Note on `AGENT_FUEL_CODEX_BUDGET`:** Codex quota is read directly from the Codex TUI via `expect` scraping. This variable is only used as a rough fallback estimate (shown as `[~est]`) when the TUI reports no quota warning and a percentage cannot be determined. It is a guess based on local session cost data — not an official Codex quota signal. The TUI scrape is always preferred.
 
----
-
-## 📦 Changelog
-
-### v0.3.0
-- **Codex TUI scrape**: replaced inaccurate `ccusage` cost estimate with an `expect` wrapper that reads the real Codex quota warning (`"Individual quota reached. Resets in Xh Ym"`) — same pattern as AGY. `ccusage` kept as a labelled `[~est]` fallback when quota has not yet been exhausted.
-- **Streaming render with fixed order**: placeholder rows print immediately; each bar overwrites in-place as its adapter resolves. Row order is always `Claude Code → Codex → AGY Gemini → AGY Other`.
-- **AGY split view**: Gemini and non-Gemini (Claude, etc.) quota buckets shown as separate rows
-- **5-minute disk cache** for AGY quota — repeated runs complete in ~1s instead of ~20s
-- Output size cap, typed `any` removal, env validation hardening
-
-### v0.2.x
-- AGY quota now scraped live from `agy /usage` panel via `expect` wrapper (zero token cost)
-- Claude Code budget corrected to $20 rolling limit
-- Replaced token-consuming `claude -p` calls with offline `ccusage` scraping
