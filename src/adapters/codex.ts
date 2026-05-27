@@ -203,7 +203,7 @@ async function fetchCcusageEstimate(budgetLimit: number): Promise<UsageSnapshot>
     if (latestActivity > 0) {
       try {
         resetAt = new Date(latestActivity + ROLLING_WINDOW_MS).toLocaleTimeString([], {
-          hour: '2-digit', minute: '2-digit',
+          hour: '2-digit', minute: '2-digit', hour12: false,
         });
       } catch { /* leave null */ }
     }

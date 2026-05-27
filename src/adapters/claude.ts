@@ -40,6 +40,23 @@ async function runClaudeScrape(): Promise<string> {
 
 // ── Parser ─────────────────────────────────────────────────────────────────
 
+/** Convert any 12h am/pm time within a string to 24h (HH:MM). */
+function to24h(s: string): string {
+  return s.replace(
+    /\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/gi,
+    (_, h, m, meridiem) => {
+      let hour = parseInt(h, 10);
+      const min = m ?? '00';
+      if (meridiem.toLowerCase() === 'am') {
+        if (hour === 12) hour = 0;          // 12am → 00:xx
+      } else {
+        if (hour !== 12) hour += 12;        // 1–11pm → 13–23
+      }
+      return `${String(hour).padStart(2, '0')}:${min}`;
+    },
+  );
+}
+
 interface ClaudeScrapeResult {
   sessionUsedPct: number | null;
   sessionResetAt: string | null;
@@ -58,9 +75,10 @@ function parseScrapeOutput(screen: string): ClaudeScrapeResult {
   const sessionUsedPct = usedMatches[0] ? parseInt(usedMatches[0][1], 10) : null;
   const weeklyUsedPct  = usedMatches[1] ? parseInt(usedMatches[1][1], 10) : null;
 
-  // Reset time: "Resets H:MMam" or "Resets May 30 at 6am" — grab the first occurrence
+  // Reset time: "Resets H:MMam" or "Resets May 30 at 6am" — grab the first occurrence,
+  // then normalise any 12h am/pm component to 24h (e.g. "11:10pm" → "23:10").
   const resetMatch = screen.match(/Resets\s+([^\n\r]+)/i);
-  const sessionResetAt = resetMatch ? resetMatch[1].trim() : null;
+  const sessionResetAt = resetMatch ? to24h(resetMatch[1].trim()) : null;
 
   debug('claude:parse', 'result', { sessionUsedPct, sessionResetAt, weeklyUsedPct });
   return { sessionUsedPct, sessionResetAt, weeklyUsedPct };
