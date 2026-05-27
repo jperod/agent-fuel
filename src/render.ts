@@ -48,6 +48,9 @@ export function renderDashboard(snapshots: UsageSnapshot[]): void {
     if (snap.resetAt) {
       detailStr = ` ${dim}${gray}(resets ${snap.resetAt})${reset}`;
     }
+    if (snap.tool === 'agy' && snap.raw && typeof snap.raw === 'object' && 'activeModel' in snap.raw) {
+      detailStr += ` ${dim}${gray}[${(snap.raw as any).activeModel}]${reset}`;
+    }
 
     console.log(`${bold}${displayName.padEnd(12)}${reset} [${barStr}] ${percentStr}${detailStr}`);
   }

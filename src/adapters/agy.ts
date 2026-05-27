@@ -57,14 +57,16 @@ export class AgyQuotaAdapter implements QuotaAdapter {
         }
       }
 
-      // 3. Calculate remaining percent based on active usage
+      // 3. Calculate remaining percent based on active usage and model tier
       // Support dynamic overrides using AGENT_FUEL_AGY_PERCENT environment variable
       let remainingPercent = 100;
       if (process.env.AGENT_FUEL_AGY_PERCENT) {
         remainingPercent = Math.max(0, Math.min(100, Number(process.env.AGENT_FUEL_AGY_PERCENT)));
-      } else if (todayPromptsCount > 0) {
-        // High-fidelity fallback matching the user's free consumer tier quota (80% remaining when active)
-        remainingPercent = 80;
+      } else {
+        const isProModel = activeModel.toLowerCase().includes('pro');
+        const limit = isProModel ? 3 : 5; // Pro models have a tighter limit of 3, Flash has 5
+        const costPerPrompt = 100 / limit;
+        remainingPercent = Math.max(0, Math.round(100 - (todayPromptsCount * costPerPrompt)));
       }
 
       // 4. Calculate rolling reset time (5 hours rolling or resets in 4h 37m from latest prompt, giving ~01:30 PM resets)
