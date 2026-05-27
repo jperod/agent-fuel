@@ -42,3 +42,6 @@ tsx/
 # OS Files
 .DS_Store
 Thumbs.db
+
+# npm pack tarballs
+*.tgz
