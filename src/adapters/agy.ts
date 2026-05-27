@@ -2,7 +2,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { QuotaAdapter, UsageSnapshot } from './index.js';
-import { TuiScraper } from '../tmux.js';
+import { TuiScraper, sleep } from '../tmux.js';
+import { debug } from '../debug.js';
 
 const CACHE_PATH = path.join(os.homedir(), '.gemini/antigravity-cli/.agent-fuel-quota-cache.json');
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
@@ -20,10 +21,6 @@ interface QuotaCache {
 
 // ── Scraping ───────────────────────────────────────────────────────────────
 
-async function sleep(ms: number): Promise<void> {
-  return new Promise(res => setTimeout(res, ms));
-}
-
 /**
  * Launches `agy` in a tmux session, opens the `/usage` panel, waits for
  * the Model Quota list to render, then returns clean rendered screen text.
@@ -33,8 +30,16 @@ async function runAgyUsage(): Promise<string> {
   try {
     tui.start();
 
-    // Wait for AGY main menu ready
-    await tui.waitFor(/for shortcuts/, 20_000);
+    // Wait for AGY main menu ready.
+    // On first run in a new directory, AGY shows a "Do you trust this project?"
+    // prompt. The "Yes, I trust this folder" option is pre-selected; press Enter.
+    const firstScreen = await tui.waitFor(/for shortcuts|Do you trust/i, 20_000);
+    if (!/for shortcuts/i.test(firstScreen)) {
+      debug('agy:scrape', 'trust prompt detected — confirming with Enter');
+      await sleep(300); // ensure app is fully interactive before sending input
+      tui.sendKey('Enter');
+      await tui.waitFor(/for shortcuts/, 15_000);
+    }
 
     // Navigate to /usage panel
     tui.send('/usage');

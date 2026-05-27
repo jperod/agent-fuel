@@ -1,12 +1,8 @@
 import { QuotaAdapter, UsageSnapshot } from './index.js';
-import { TuiScraper } from '../tmux.js';
+import { TuiScraper, sleep } from '../tmux.js';
 import { debug } from '../debug.js';
 
 // ── TUI scraper ────────────────────────────────────────────────────────────
-
-async function sleep(ms: number): Promise<void> {
-  return new Promise(res => setTimeout(res, ms));
-}
 
 /**
  * Launches `claude` in a tmux session, opens /status, navigates to the
