@@ -55,6 +55,10 @@ async function runCodexScrape(): Promise<string> {
 
     // Stream all pane output to a file from the start.
     // Single-quote escaping: safe against all shell metacharacters ($, `, \, space, etc.)
+    // Note: pipe-pane executes this command via tmux's `default-shell` (defaults to /bin/sh).
+    // If the user has set default-shell to a non-POSIX shell (e.g. fish), the `'\\''` idiom
+    // will fail — but pipePath is constructed from os.tmpdir() + hex, so single quotes
+    // cannot appear in practice, making the replace a no-op and the quoting sh-compatible.
     const shellSafePath = "'" + pipePath.replace(/'/g, "'\\''") + "'";
     execFileSync('tmux', ['pipe-pane', '-t', tui.sessionId, `cat >> ${shellSafePath}`]);
     debug('codex:scrape', `pipe-pane logging to ${pipePath}`);
