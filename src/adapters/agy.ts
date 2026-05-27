@@ -29,16 +29,10 @@ export class AgyQuotaAdapter implements QuotaAdapter {
         // Fallback to default model name if reading or parsing settings failed
       }
 
-      // 2. Read history.jsonl to detect active prompts today
+      // 2. Read history.jsonl to detect active prompts within the rolling 5-hour window
       let todayPromptsCount = 0;
       let latestPromptTimestamp: number | null = null;
-
-      // Construct local todayPrefix in YYYY-MM-DD format (timezone aware)
-      const now = new Date();
-      const year = now.getFullYear();
-      const month = String(now.getMonth() + 1).padStart(2, '0');
-      const day = String(now.getDate()).padStart(2, '0');
-      const todayPrefix = `${year}-${month}-${day}`;
+      const fiveHoursAgo = Date.now() - 5 * 60 * 60 * 1000;
 
       try {
         const historyContent = await fs.readFile(historyPath, 'utf-8');
@@ -48,14 +42,8 @@ export class AgyQuotaAdapter implements QuotaAdapter {
           if (!line.trim()) continue;
           const entry = JSON.parse(line);
           if (entry && entry.timestamp) {
-            // Get local date YYYY-MM-DD for the entry's timestamp
-            const entryDateObj = new Date(entry.timestamp);
-            const eYear = entryDateObj.getFullYear();
-            const eMonth = String(entryDateObj.getMonth() + 1).padStart(2, '0');
-            const eDay = String(entryDateObj.getDate()).padStart(2, '0');
-            const entryDate = `${eYear}-${eMonth}-${eDay}`;
-
-            if (entryDate === todayPrefix) {
+            // Check if the prompt falls within the 5-hour rolling window
+            if (entry.timestamp >= fiveHoursAgo) {
               todayPromptsCount++;
               if (!latestPromptTimestamp || entry.timestamp > latestPromptTimestamp) {
                 latestPromptTimestamp = entry.timestamp;
@@ -71,9 +59,14 @@ export class AgyQuotaAdapter implements QuotaAdapter {
       // Support dynamic overrides using AGENT_FUEL_AGY_PERCENT environment variable
       let remainingPercent = 100;
       const isProModel = activeModel.toLowerCase().includes('pro');
-      const limit = isProModel ? 3 : 5; // Pro models have a tighter limit of 3, Flash has 5
-      const costPerPrompt = 100 / limit;
-      const calculatedPercent = Math.max(0, Math.round(100 - (todayPromptsCount * costPerPrompt)));
+      let calculatedPercent = 100;
+      if (isProModel) {
+        // Pro models: limit is 10 prompts, steps of 2 prompts (each step is 20%)
+        calculatedPercent = Math.max(0, 100 - (Math.floor(todayPromptsCount / 2) * 20));
+      } else {
+        // Flash models: limit is 25 prompts, steps of 5 prompts (each step is 20%)
+        calculatedPercent = Math.max(0, 100 - (Math.floor(todayPromptsCount / 5) * 20));
+      }
 
       if (process.env.AGENT_FUEL_AGY_PERCENT) {
         const envVal = Number(process.env.AGENT_FUEL_AGY_PERCENT);

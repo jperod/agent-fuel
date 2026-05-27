@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { UsageSnapshot } from './adapters/index.js';
 
 export function renderDashboard(snapshots: UsageSnapshot[]): void {
@@ -9,6 +12,16 @@ export function renderDashboard(snapshots: UsageSnapshot[]): void {
   const yellow = '\x1b[33m';
   const red = '\x1b[31m';
   const gray = '\x1b[90m';
+
+  // Load version from package.json dynamically
+  let versionStr = '';
+  try {
+    const __dirname = path.dirname(fileURLToPath(import.meta.url));
+    const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '../package.json'), 'utf8'));
+    versionStr = ` v${packageJson.version}`;
+  } catch {
+    // Fallback if reading package.json fails
+  }
 
   console.log(`\n${bold}${cyan}⚡️ Agent Fuel - CLI Quota Monitor${reset}\n`);
 
@@ -54,7 +67,7 @@ export function renderDashboard(snapshots: UsageSnapshot[]): void {
 
     console.log(`${bold}${displayName.padEnd(12)}${reset} [${barStr}] ${percentStr}${detailStr}`);
   }
-  console.log('');
+  console.log(`\n${dim}${gray}agent-fuel${versionStr}${reset}\n`);
 }
 
 function getDisplayName(tool: string): string {

@@ -1,6 +1,6 @@
 {
   "name": "agent-fuel",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Sleek term-based dashboard for AI coding CLI quotas",
   "type": "module",
   "main": "dist/index.js",
