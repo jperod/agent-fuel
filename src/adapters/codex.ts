@@ -1,7 +1,6 @@
-import { exec } from 'node:child_process';
+import { exec, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readFileSync, unlinkSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
 import { QuotaAdapter, UsageSnapshot } from './index.js';
 import { TuiScraper } from '../tmux.js';
 import { debug } from '../debug.js';
@@ -37,7 +36,7 @@ async function runCodexScrape(): Promise<string> {
     tui.start();
 
     // Stream all pane output to a file from the start
-    execFileSync('tmux', ['pipe-pane', '-t', tui.sessionId, `cat >> ${pipePath}`]);
+    execFileSync('tmux', ['pipe-pane', '-t', tui.sessionId, `cat >> '${pipePath}'`]);
     debug('codex:scrape', `pipe-pane logging to ${pipePath}`);
 
     // Wait for TUI ready: current screen (historyLines=0) shows Tip, meaning MCP boot done
