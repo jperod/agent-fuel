@@ -1,0 +1,30 @@
+{
+  "name": "agent-fuel",
+  "version": "1.0.0",
+  "description": "Sleek term-based dashboard for AI coding CLI quotas",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "agent-fuel": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc -w",
+    "start": "node dist/index.js"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "quota",
+    "dashboard",
+    "claude",
+    "codex",
+    "agy"
+  ],
+  "author": "Pedro Rodrigues",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.11.24",
+    "typescript": "^5.3.3"
+  }
+}
