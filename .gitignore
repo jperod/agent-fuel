@@ -45,3 +45,12 @@ Thumbs.db
 
 # npm pack tarballs
 *.tgz
+
+# Local Env
+.claude
+.antigravitycli
+.vscode
+
+# Debugging & Logs
+.logs
+
