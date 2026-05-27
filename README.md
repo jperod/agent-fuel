@@ -4,18 +4,28 @@ A sleek, unified CLI dashboard to monitor your AI coding assistant quotas, credi
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Installation & Running
 
-Get **Agent Fuel** installed, globally linked, and running on your system with a single one-liner command:
+Install **Agent Fuel** globally on your system in one step:
 
 ```bash
-npm install && npm run build && npm link && agent-fuel
+npm install -g agent-fuel
 ```
 
-Once globally linked, you can run the dashboard at any time from **any directory** on your machine by simply typing:
+Once installed, you can run the dashboard at any time from **any directory** on your machine by simply typing:
 
 ```bash
 agent-fuel
+```
+
+### Development Setup
+If you want to run or contribute to `agent-fuel` locally:
+```bash
+git clone https://github.com/jperod/agent-fuel.git
+cd agent-fuel
+npm install
+npm run build
+npm link
 ```
 
 ---
@@ -39,7 +49,7 @@ Because each CLI exposes quota information differently (some via strict JSON, ot
 2. **Normalizes Quota Models**: Standardizes diverse limits into a uniform percentage score (`0` to `100%`).
 3. **Renders an Elegant CLI Dashboard**: Displays a high-fidelity 3-bar ASCII progress dashboard directly in your terminal.
 
-### Proposed Architecture
+### Project Architecture
 
 ```text
 agent-fuel/
@@ -47,10 +57,9 @@ agent-fuel/
   │   ├── index.ts          # CLI entry point
   │   ├── render.ts         # Beautiful 3-bar dashboard renderer
   │   └── adapters/
-  │       ├── claude.ts     # Adapter for Claude Code (ccusage/native)
-  │       ├── codex.ts      # Adapter for Codex (local session/status)
-  │       ├── agy.ts        # Adapter for AGY (Antigravity config parser)
-  │       └── ccusage.ts    # Shared JSON parser helper
+  │       ├── claude.ts     # Adapter for Claude Code (ccusage blocks)
+  │       ├── codex.ts      # Adapter for Codex (ccusage codex session)
+  │       └── agy.ts        # Adapter for AGY (Antigravity history & model config parser)
   ├── package.json
   └── README.md
 ```
@@ -77,9 +86,9 @@ Running `agent-fuel` will immediately output a clean, colored visual summary of 
 ```text
 ⚡️ Agent Fuel - CLI Quota Monitor
 
-Codex        [░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] unknown
-Claude Code  [██████████████████████████░░░░]  86% remaining (resets 01:00 PM)
-AGY          [░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] unknown
+Codex        [██████████████████████████████]  99% remaining (resets 01:49 PM)
+Claude Code  [█████████████████████████░░░░░]  83% remaining (resets 01:00 PM)
+AGY          [██████████████████░░░░░░░░░░░░]  60% remaining (resets 01:57 PM) [Gemini 3.5 Flash (High)]
 ```
 
 
