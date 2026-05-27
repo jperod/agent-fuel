@@ -39,6 +39,9 @@ function cleanupAll(): void {
   activeTempFiles.clear();
 }
 
+// Register signal handlers eagerly at module load time so that any temp files
+// registered before TuiScraper.start() (e.g. between registerTempFile and start())
+// are still cleaned up on SIGINT/SIGTERM/SIGHUP.
 let signalsRegistered = false;
 function registerSignalHandlers(): void {
   if (signalsRegistered) return;
@@ -59,6 +62,7 @@ function registerSignalHandlers(): void {
     process.exit(1);
   });
 }
+registerSignalHandlers(); // called at import time — guarded by signalsRegistered flag
 
 export class TuiScraper {
   readonly sessionId: string;
@@ -72,7 +76,6 @@ export class TuiScraper {
   }
 
   start(): void {
-    registerSignalHandlers();
     try {
       execFileSync('which', ['tmux'], { stdio: 'ignore', timeout: 5000 });
     } catch {
@@ -126,11 +129,11 @@ export class TuiScraper {
   }
 
   kill(): void {
-    activeScrapers.delete(this);
     debug('tmux', `killing session ${this.sessionId}`);
     try {
       execFileSync('tmux', ['kill-session', '-t', this.sessionId], { stdio: 'ignore', timeout: 3000 });
     } catch { /* already dead */ }
+    activeScrapers.delete(this); // delete after kill attempt so cleanupAll() can retry on timeout
   }
 }
 
