@@ -54,3 +54,5 @@ Thumbs.db
 # Debugging & Logs
 .logs
 
+# GitOps
+PR.md
