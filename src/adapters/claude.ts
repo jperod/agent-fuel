@@ -17,8 +17,15 @@ async function runClaudeScrape(): Promise<string> {
   try {
     tui.start();
 
-    // Wait for TUI ready — welcome banner or prompt hint visible
-    await tui.waitFor(/Welcome back|Try "/i, 15_000, 0);
+    // Wait for TUI ready — welcome banner, prompt hint, or trust folder screen visible
+    const firstScreen = await tui.waitFor(/Welcome back|Try "|trust this folder/i, 15_000, 0);
+
+    if (/trust this folder/i.test(firstScreen)) {
+      debug('claude:scrape', 'trust folder prompt detected, confirming trust...');
+      tui.sendKey('Enter');
+      // Now wait for the main interface
+      await tui.waitFor(/Welcome back|Try "/i, 15_000, 0);
+    }
 
     // Open the /status panel
     tui.send('/status');
