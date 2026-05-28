@@ -26,7 +26,7 @@ const config = loadConfig();
 
 function spinnerLine(tool: SlotTool): string {
   const frame = SPINNER[spinnerTick % SPINNER.length];
-  return `${BOLD}${getDisplayName(tool).padEnd(13)}${R} ${DIM}${GRAY}${frame} loading...${R}\x1b[K`;
+  return `${BOLD}${getDisplayName(tool).padEnd(13)}${R} ${GRAY}${frame} loading...${R}\x1b[K`;
 }
 
 function calculateTotalLine(snapshots: Map<SlotTool, UsageSnapshot | null>): string {
@@ -52,7 +52,7 @@ function calculateTotalLine(snapshots: Map<SlotTool, UsageSnapshot | null>): str
   if (!hasActive) {
     if (isAnyLoading) {
       const frame = SPINNER[spinnerTick % SPINNER.length];
-      return `${BOLD}${CYAN}Total${R}         [${GRAY}${SHADE_CHAR.repeat(30)}${R}] ${DIM}${GRAY}${frame} loading...${R}\x1b[K`;
+      return `${BOLD}${CYAN}Total${R}         [${GRAY}${SHADE_CHAR.repeat(30)}${R}] ${GRAY}${frame} loading...${R}\x1b[K`;
     }
     
     const totalSnap: UsageSnapshot = {
@@ -81,9 +81,9 @@ function calculateTotalLine(snapshots: Map<SlotTool, UsageSnapshot | null>): str
   
   if (isAnyLoading) {
     const frame = SPINNER[spinnerTick % SPINNER.length];
-    formatted += ` ${DIM}${GRAY}${frame} loading...${R}`;
+    formatted += ` ${GRAY}${frame} loading...${R}`;
   } else {
-    formatted += `  ${DIM}${GRAY}(tune weights: agent-fuel config)${R}`;
+    formatted += `  ${GRAY}(tune weights: agent-fuel config)${R}`;
   }
   
   return formatted;

@@ -52,17 +52,17 @@ function loadVersion(): string {
 
 function formatResetAt(resetAt: string): string {
   if (resetAt.toLowerCase().includes('available')) {
-    return `${DIM}${GREEN}✓ quota available${R}`;
+    return `${GREEN}✓ quota available${R}`;
   }
   const codexMatch = resetAt.match(/^Resets in\s*(.+)/i);
   if (codexMatch) {
-    return `${DIM}${GRAY}(resets in ${codexMatch[1]})${R}`;
+    return `${GRAY}(resets in ${codexMatch[1]})${R}`;
   }
   const agyMatch = resetAt.match(/^Refreshes in\s*(.+)/i);
   if (agyMatch) {
-    return `${DIM}${GRAY}(resets in ${agyMatch[1]})${R}`;
+    return `${GRAY}(resets in ${agyMatch[1]})${R}`;
   }
-  return `${DIM}${GRAY}(resets ${resetAt})${R}`;
+  return `${GRAY}(resets ${resetAt})${R}`;
 }
 
 function isEstimate(snap: UsageSnapshot): boolean {
@@ -97,12 +97,12 @@ export function formatRow(snap: UsageSnapshot): string {
        snap.raw && typeof snap.raw === 'object') {
     const label = (snap.raw as Record<string, unknown>).matchedModel;
     if (typeof label === 'string' && label) {
-      parts.push(`${DIM}${GRAY}[${label}]${R}`);
+      parts.push(`${GRAY}[${label}]${R}`);
     }
   }
 
   if (isEstimate(snap)) {
-    parts.push(`${DIM}${GRAY}[~est]${R}`);
+    parts.push(`${GRAY}[~est]${R}`);
   }
 
   const detailStr = parts.length > 0 ? ` ${parts.join(' ')}` : '';
@@ -122,10 +122,10 @@ export function printRow(snap: UsageSnapshot): void {
 }
 
 export function printFooter(): void {
-  console.log(`\n${DIM}${GRAY}agent-fuel${loadVersion()}${R}\n`);
+  console.log(`\n${GRAY}agent-fuel${loadVersion()}${R}\n`);
 }
 
-export const LOADING_LINE = `${DIM}${GRAY}loading...${R}`;
+export const LOADING_LINE = `${GRAY}loading...${R}`;
 
 /** Convenience wrapper — renders a full static dashboard in one call. */
 export function renderDashboard(snapshots: UsageSnapshot[]): void {
