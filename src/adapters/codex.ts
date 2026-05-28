@@ -144,6 +144,18 @@ function parseScrapeOutput(raw: string): CodexScrapeResult {
     return { quotaReached: true, resetIn, fiveHourRemainingPct: null, fiveHourResetAt: null };
   }
 
+  // Parse "/status" panel: "5h limit: [...] X% left (resets HH:MM)"
+  // Use the LAST match — /status is sent twice and the second response is fresh.
+  const allFiveHMatches = [...clean.matchAll(/5h limit:\s*\[.*?\]\s*(\d+)%\s*left\s*\(resets\s+([^)]+)\)/gi)];
+  const fiveHMatch = allFiveHMatches.at(-1) ?? null;
+  
+  if (fiveHMatch) {
+    const fiveHourRemainingPct = Math.min(100, Math.max(0, parseInt(fiveHMatch[1], 10)));
+    const fiveHourResetAt = fiveHMatch[2].trim();
+    debug('codex:parse', 'result', { quotaReached: false, fiveHourRemainingPct, fiveHourResetAt, fiveHMatchRaw: fiveHMatch[0] });
+    return { quotaReached: false, resetIn: null, fiveHourRemainingPct, fiveHourResetAt };
+  }
+
   // "⚠ Heads up, you have less than X% of your 5h limit left."
   const headsUpMatch = clean.match(/less than (\d+)%\s+of your 5h limit left/i);
   if (headsUpMatch) {
@@ -153,15 +165,8 @@ function parseScrapeOutput(raw: string): CodexScrapeResult {
     return { quotaReached: false, resetIn: null, fiveHourRemainingPct, fiveHourResetAt: null };
   }
 
-  // Parse "/status" panel: "5h limit: [...] X% left (resets HH:MM)"
-  // Use the LAST match — /status is sent twice and the second response is fresh.
-  const allFiveHMatches = [...clean.matchAll(/5h limit:\s*\[.*?\]\s*(\d+)%\s*left\s*\(resets\s+([^)]+)\)/gi)];
-  const fiveHMatch = allFiveHMatches.at(-1) ?? null;
-  const fiveHourRemainingPct = fiveHMatch ? parseInt(fiveHMatch[1], 10) : null;
-  const fiveHourResetAt = fiveHMatch ? fiveHMatch[2].trim() : null;
-
-  debug('codex:parse', 'result', { quotaReached: false, fiveHourRemainingPct, fiveHourResetAt, fiveHMatchRaw: fiveHMatch?.[0] ?? null });
-  return { quotaReached: false, resetIn: null, fiveHourRemainingPct, fiveHourResetAt };
+  debug('codex:parse', 'result', { quotaReached: false, fiveHourRemainingPct: null, fiveHourResetAt: null, fiveHMatchRaw: null });
+  return { quotaReached: false, resetIn: null, fiveHourRemainingPct: null, fiveHourResetAt: null };
 }
 
 // ── ccusage fallback estimate ──────────────────────────────────────────────
