@@ -6,7 +6,7 @@ import { UsageSnapshot } from './adapters/index.js';
 // ── Constants ──────────────────────────────────────────────────────────────
 
 const BLOCK_CHAR = '█';
-const SHADE_CHAR = '░';
+export const SHADE_CHAR = '░';
 const BAR_WIDTH   = 30;
 
 // ── ANSI colour helpers ────────────────────────────────────────────────────
@@ -28,11 +28,13 @@ export function getDisplayName(tool: string): string {
     case 'claude-code': return 'Claude Code';
     case 'agy-gemini':  return 'AGY Gemini';
     case 'agy-other':   return 'AGY Other';
+    case 'total':       return 'Total';
     default:            return tool;
   }
 }
 
-function pickColour(remaining: number): string {
+function pickColour(remaining: number, isLoading?: boolean): string {
+  if (isLoading) return CYAN;
   if (remaining < 20) return RED;
   if (remaining < 50) return YELLOW;
   return GREEN;
@@ -80,7 +82,7 @@ export function formatRow(snap: UsageSnapshot): string {
     barStr     = `${GRAY}${SHADE_CHAR.repeat(BAR_WIDTH)}${R}`;
     percentStr = `${GRAY}unknown${R}`;
   } else {
-    const colour  = pickColour(remaining);
+    const colour  = pickColour(remaining, snap.isLoading);
     const filled  = Math.max(0, Math.min(BAR_WIDTH, Math.round((remaining * BAR_WIDTH) / 100)));
     const empty   = BAR_WIDTH - filled;
     barStr     = `${colour}${BLOCK_CHAR.repeat(filled)}${R}${GRAY}${SHADE_CHAR.repeat(empty)}${R}`;
@@ -104,7 +106,9 @@ export function formatRow(snap: UsageSnapshot): string {
   }
 
   const detailStr = parts.length > 0 ? ` ${parts.join(' ')}` : '';
-  return `${BOLD}${displayName.padEnd(13)}${R} [${barStr}] ${percentStr}${detailStr}`;
+  const isTotal = snap.tool === 'total';
+  const labelPrefix = isTotal ? `${BOLD}${CYAN}` : BOLD;
+  return `${labelPrefix}${displayName.padEnd(13)}${R} [${barStr}] ${percentStr}${detailStr}`;
 }
 
 // ── Public render functions ────────────────────────────────────────────────

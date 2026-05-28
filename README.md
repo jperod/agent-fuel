@@ -45,10 +45,11 @@ AI coding assistants are now integral to developer workflows. Tools like **Claud
 `agent-fuel` is a tiny modern CLI built with TypeScript that:
 
 1. **Dispatches Adapters concurrently** — all adapters run in parallel and each row is printed the moment its adapter resolves; you never wait for the slowest tool.
-2. **Normalises Quota Models** — standardises diverse limits into a uniform `0–100%` score.
-3. **Scrapes TUI output directly** — Codex and AGY quotas are read by spawning the real CLIs via `expect` and parsing terminal output, so the numbers match what the tools themselves show.
-4. **Caches AGY results** — AGY quota is cached for 5 minutes so repeated runs are instant (~1s).
-5. **Renders a clean dashboard** — colour-coded bars with reset times directly in your terminal.
+2. **Streams Consolidated Quota Live** — renders a weighted **Total** bar on top which calculates and updates in real-time as each provider finishes loading, showing the live calculated portion rather than waiting for all adapters to finish.
+3. **Normalises Quota Models** — standardises diverse limits into a uniform `0–100%` score.
+4. **Scrapes TUI output directly** — Codex and AGY quotas are read by spawning the real CLIs via `expect` and parsing terminal output, so the numbers match what the tools themselves show.
+5. **Caches AGY results** — AGY quota is cached for 5 minutes so repeated runs are instant (~1s).
+6. **Renders a clean dashboard** — colour-coded bars with reset times directly in your terminal.
 
 ### Project Architecture
 
@@ -57,6 +58,7 @@ agent-fuel/
   ├── src/
   │   ├── index.ts            # CLI entry point — runs all adapters concurrently
   │   ├── render.ts           # Colour-coded bar dashboard renderer
+  │   ├── config.ts           # Config file manager & config command handler
   │   └── adapters/
   │       ├── index.ts        # Shared UsageSnapshot type & QuotaAdapter interface
   │       ├── claude.ts       # Claude Code (via ccusage blocks)
@@ -86,28 +88,67 @@ type UsageSnapshot = {
 ```
 ⚡️ Agent Fuel - CLI Quota Monitor
 
-Claude Code   [██████████████████████░░░░░░░░]  72% remaining (resets 23:10 (Europe/Copenhagen))
-Codex         [█████████████████████░░░░░░░░░]  69% remaining (resets 23:37)
-AGY Gemini    [██████████████████████████████] 100% remaining ✓ quota available [Gemini 3.5 Flash (Medium)]
-AGY Other     [████████████░░░░░░░░░░░░░░░░░░]  40% remaining (resets in 122h 53m) [Claude Sonnet 4.6 (Thinking)]
+Total         [████████████████████████░░░░░░]  81% remaining  (tune weights: agent-fuel config)
 
-agent-fuel v0.x.y
+Claude Code   [██████████████████████░░░░░░░░]  74% remaining (resets 13:19 (Europe/Copenhagen))
+Codex         [██████████████████████████████]  99% remaining (resets 13:56)
+AGY Gemini    [██████████████████████████████] 100% remaining ✓ quota available [Gemini 3.5 Flash (Medium)]
+AGY Other     [████████████░░░░░░░░░░░░░░░░░░]  40% remaining (resets in 109h 12m) [Claude Sonnet 4.6 (Thinking)]
+
+agent-fuel v0.5.0
 ```
 
-Rows appear as each adapter resolves — Claude Code (instant) prints first, Codex and AGY follow as their TUI scrapes complete.
+- **Total** bar prints on top (in TTY interactive mode) showing the weighted consolidated remaining quota. As adapters load, the bar fills up in real-time. When fully loaded, a helpful CLI reminder is displayed alongside the Total percentage.
+- Rows appear as each adapter resolves — Claude Code (instant) prints first, Codex and AGY follow as their TUI scrapes complete.
+- **AGY Gemini** shows the worst-case remaining across all `Gemini *` model tiers.  
+- **AGY Other** shows the worst-case across Claude and other non-Gemini models.  
+- **Codex** row tagged `[~est]` when quota has not been reached and the percentage is estimated from local session cost data (see fallback note below).
 
-**AGY Gemini** shows the worst-case remaining across all `Gemini *` model tiers.  
-**AGY Other** shows the worst-case across Claude and other non-Gemini models.  
-**Codex** row tagged `[~est]` when quota has not been reached and the percentage is estimated from local session cost data (see fallback note below).
+---
+
+## ⚙️ Configuration & Custom Weights
+
+Different developers operate under different quota sizes. By default, `agent-fuel` weights each provider bucket as standard proxies for monthly dollar subscription amounts:
+- Claude Code (`claude-code`): `20`
+- Codex CLI (`codex`): `20`
+- AGY Gemini (`agy-gemini`): `10`
+- AGY Other (`agy-other`): `10`
+
+If a provider is completely unused or fails to return a quota percentage, its weight is **dynamically excluded** from the calculation, ensuring that missing/unused services don't break the consolidated bar.
+
+### Managing Settings via the CLI
+
+You can view or update your weights and settings directly using the CLI:
+
+* **View Active Configuration**:
+  ```bash
+  agent-fuel config
+  ```
+* **Change Provider Weight**:
+  ```bash
+  agent-fuel config set claude-code 50
+  ```
+* **Disable/Enable Total Bar**:
+  ```bash
+  agent-fuel config set show-total false
+  ```
+
+Settings are persistently saved to `~/.config/agent-fuel/config.json`.
 
 ---
 
 ## ⚙️ Environment Overrides
 
+Environment variables take highest precedence and override any values saved in the config JSON file:
+
 | Variable | Default | Description |
 |---|---|---|
 | `AGENT_FUEL_CLAUDE_BUDGET` | `20.0` | Claude Code rolling budget in USD |
 | `AGENT_FUEL_CODEX_BUDGET` | `20.0` | **Fallback estimate only** — Codex rolling budget in USD |
+| `AGENT_FUEL_WEIGHT_CLAUDE` | `20` | Weight size ratio of the Claude Code quota pool |
+| `AGENT_FUEL_WEIGHT_CODEX` | `20` | Weight size ratio of the Codex quota pool |
+| `AGENT_FUEL_WEIGHT_AGY_GEMINI` | `10` | Weight size ratio of the AGY Gemini quota pool |
+| `AGENT_FUEL_WEIGHT_AGY_OTHER` | `10` | Weight size ratio of the AGY Other quota pool |
+| `AGENT_FUEL_SHOW_TOTAL` | `true` | Show or hide the consolidated Total quota bar (`true`/`false`) |
 
 > **Note on `AGENT_FUEL_CODEX_BUDGET`:** Codex quota is read directly from the Codex TUI via `expect` scraping. This variable is only used as a rough fallback estimate (shown as `[~est]`) when the TUI reports no quota warning and a percentage cannot be determined. It is a guess based on local session cost data — not an official Codex quota signal. The TUI scrape is always preferred.
-
