@@ -41,7 +41,7 @@ const CODEX_STATUS_READY_MS     =  4_000; // second /status carries the live quo
  * every raw byte to a file so even a 10ms overlay is permanently recorded.
  */
 async function runCodexScrape(): Promise<string> {
-  const tui = new TuiScraper('codex');
+  const tui = new TuiScraper('env CODEX_NON_INTERACTIVE=1 codex');
   
   const tmpDir = os.tmpdir();
   const randomSuffix = crypto.randomBytes(6).toString('hex');
@@ -68,8 +68,15 @@ async function runCodexScrape(): Promise<string> {
     let screen = await tui.waitFor(CODEX_EITHER, CODEX_STARTUP_MS, 0);
 
     while (!CODEX_READY.test(screen)) {
-      debug('codex:scrape', 'blocking dialog detected — sending "2" to dismiss');
-      tui.send('2');
+      if (/Update available/i.test(screen)) {
+        debug('codex:scrape', 'Update available dialog detected — sending Down + Enter to skip');
+        tui.sendKey('Down');
+        await sleep(200);
+        tui.sendKey('Enter');
+      } else {
+        debug('codex:scrape', 'blocking dialog detected — sending "2" to dismiss');
+        tui.send('2');
+      }
       await sleep(CODEX_DIALOG_SETTLE_MS);
       const remaining = dialogDeadline - Date.now(); // compute AFTER sleep
       if (remaining < 500) {
