@@ -13,18 +13,38 @@ import { debug } from '../debug.js';
  * capture-pane is sufficient — no pipe-pane needed.
  */
 async function runClaudeScrape(): Promise<string> {
-  const tui = new TuiScraper('claude');
+  const tui = new TuiScraper('env DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 claude');
   try {
     tui.start();
 
-    // Wait for TUI ready — welcome banner, prompt hint, or trust folder screen visible
-    const firstScreen = await tui.waitFor(/Welcome back|Try "|trust this folder/i, 15_000, 0);
+    const CLAUDE_READY  = /Welcome back|Try "|❯/i;
+    const CLAUDE_DIALOG = /trust this folder|Update available|terms of service|telemetry|analytics/i;
+    const CLAUDE_EITHER = new RegExp(`(?:${CLAUDE_READY.source})|(?:${CLAUDE_DIALOG.source})`, 'i');
+    const CLAUDE_STARTUP_MS = 25_000;
+    const CLAUDE_DIALOG_SETTLE_MS = 1_000;
 
-    if (/trust this folder/i.test(firstScreen)) {
-      debug('claude:scrape', 'trust folder prompt detected, confirming trust...');
-      tui.sendKey('Enter');
-      // Now wait for the main interface
-      await tui.waitFor(/Welcome back|Try "/i, 15_000, 0);
+    const dialogDeadline = Date.now() + CLAUDE_STARTUP_MS;
+    let screen = await tui.waitFor(CLAUDE_EITHER, CLAUDE_STARTUP_MS, 0);
+
+    while (!CLAUDE_READY.test(screen)) {
+      if (/Update available/i.test(screen)) {
+        debug('claude:scrape', 'Update available prompt detected, sending Down + Enter to skip...');
+        tui.sendKey('Down');
+        await sleep(200);
+        tui.sendKey('Enter');
+      } else if (/trust this folder/i.test(screen)) {
+        debug('claude:scrape', 'trust folder prompt detected, confirming trust...');
+        tui.sendKey('Enter');
+      } else if (/terms of service|telemetry|analytics/i.test(screen)) {
+        debug('claude:scrape', 'onboarding prompt detected, sending Enter...');
+        tui.sendKey('Enter');
+      }
+      await sleep(CLAUDE_DIALOG_SETTLE_MS);
+      const remaining = dialogDeadline - Date.now();
+      if (remaining < 500) {
+        throw new Error('Claude TUI never reached ready state after dismissing dialogs');
+      }
+      screen = await tui.waitFor(CLAUDE_EITHER, remaining, 0);
     }
 
     // Open the /status panel
