@@ -43,7 +43,7 @@ async function runAgyUsage(): Promise<string> {
 
     // Navigate to /usage panel
     tui.send('/usage');
-    await tui.waitFor(/Model Quota/, 10_000);
+    await tui.waitFor(/Models?\s*(?:&\s*)?Quota/i, 10_000);
 
     // Brief pause for all model rows to finish rendering
     await sleep(500);
@@ -76,18 +76,34 @@ function parseQuotaPanel(raw: string): ModelQuotaEntry[] {
   const lines = raw.split(/\r?\n/);
   const results: ModelQuotaEntry[] = [];
 
-  const headerIdx = lines.findIndex(l => l.includes('Model Quota'));
+  const headerIdx = lines.findIndex(l => /Models?\s*(?:&\s*)?Quota/i.test(l));
   if (headerIdx === -1) return results;
 
+  let currentGroup: string | null = null;
   const panelLines = lines.slice(headerIdx + 1);
   let i = 0;
 
   while (i < panelLines.length) {
     const line = panelLines[i].trim();
 
+    if (line.length === 0) {
+      i++;
+      continue;
+    }
+
+    // Check if we hit a group header in the new layout
+    const nextLine = panelLines[i + 1]?.trim() || '';
+    if (nextLine.startsWith('Models within this group:')) {
+      currentGroup = line;
+      i += 2; // Skip the group header and the "Models within this group" lines
+      continue;
+    }
+
     const isModelName =
       line.length > 0 &&
       !line.startsWith('░') && !line.startsWith('█') &&
+      !line.startsWith('[') &&
+      !line.startsWith('│') &&
       !line.startsWith('↑') && !line.startsWith('(') &&
       !line.startsWith('┘') && !line.startsWith('└') &&
       !line.startsWith('?') && !line.startsWith('esc') &&
@@ -104,13 +120,13 @@ function parseQuotaPanel(raw: string): ModelQuotaEntry[] {
         const candidate = panelLines[j].trim();
         if (candidate.length === 0) { j++; continue; }
 
-        if (barLine === null && (candidate.includes('░') || candidate.includes('█') || /^\d+%/.test(candidate))) {
+        if (barLine === null && (candidate.includes('░') || candidate.includes('█') || /^\d+%/.test(candidate) || /\[.*\]/.test(candidate) || /[\d.]+%/.test(candidate))) {
           barLine = candidate;
           j++;
           continue;
         }
 
-        if (barLine !== null && (candidate.includes('Refreshes') || candidate.includes('Quota available'))) {
+        if (barLine !== null && (candidate.includes('Refreshes') || candidate.includes('Quota available') || candidate.includes('remaining'))) {
           const m = candidate.match(/(Refreshes in [^\r\n]+|Quota available)/);
           refreshLine = m ? m[1] : candidate;
           j++;
@@ -120,9 +136,11 @@ function parseQuotaPanel(raw: string): ModelQuotaEntry[] {
       }
 
       if (barLine !== null) {
-        const percentMatch = barLine.match(/(\d+)%/);
+        const percentMatch = barLine.match(/([\d.]+)%/);
         if (percentMatch) {
-          results.push({ model: line, percent: parseInt(percentMatch[1], 10), refreshLine });
+          const percent = Math.round(parseFloat(percentMatch[1]));
+          const name = currentGroup ? `${currentGroup} - ${line}` : line;
+          results.push({ model: name, percent, refreshLine });
         }
       }
 
