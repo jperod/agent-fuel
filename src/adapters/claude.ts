@@ -88,6 +88,7 @@ interface ClaudeScrapeResult {
   sessionUsedPct: number | null;
   sessionResetAt: string | null;
   weeklyUsedPct: number | null;
+  weeklyResetAt?: string | null;
 }
 
 function parseScrapeOutput(screen: string): ClaudeScrapeResult {
@@ -102,13 +103,14 @@ function parseScrapeOutput(screen: string): ClaudeScrapeResult {
   const sessionUsedPct = usedMatches[0] ? parseInt(usedMatches[0][1], 10) : null;
   const weeklyUsedPct  = usedMatches[1] ? parseInt(usedMatches[1][1], 10) : null;
 
-  // Reset time: "Resets H:MMam" or "Resets May 30 at 6am" — grab the first occurrence,
+  // Reset time: "Resets H:MMam" or "Resets May 30 at 6am" — grab all occurrences,
   // then normalise any 12h am/pm component to 24h (e.g. "11:10pm" → "23:10").
-  const resetMatch = screen.match(/Resets\s+([^\n\r]+)/i);
-  const sessionResetAt = resetMatch ? to24h(resetMatch[1].trim()) : null;
+  const resetMatches = [...screen.matchAll(/Resets\s+([^\n\r]+)/gi)];
+  const sessionResetAt = resetMatches[0] ? to24h(resetMatches[0][1].trim()) : null;
+  const weeklyResetAt = resetMatches[1] ? to24h(resetMatches[1][1].trim()) : null;
 
-  debug('claude:parse', 'result', { sessionUsedPct, sessionResetAt, weeklyUsedPct });
-  return { sessionUsedPct, sessionResetAt, weeklyUsedPct };
+  debug('claude:parse', 'result', { sessionUsedPct, sessionResetAt, weeklyUsedPct, weeklyResetAt });
+  return { sessionUsedPct, sessionResetAt, weeklyUsedPct, weeklyResetAt };
 }
 
 // ── Adapter ────────────────────────────────────────────────────────────────
@@ -133,13 +135,27 @@ export class ClaudeQuotaAdapter implements QuotaAdapter {
       const result = parseScrapeOutput(screen);
 
       if (result.sessionUsedPct !== null) {
-        const remainingPercent = Math.max(0, 100 - result.sessionUsedPct);
-        debug('claude:fetch', `parsed Usage tab → ${result.sessionUsedPct}% used (${remainingPercent}% remaining)`);
+        let remainingPercent = Math.max(0, 100 - result.sessionUsedPct);
+        let usedPercent = result.sessionUsedPct;
+        let resetAt = result.sessionResetAt;
+        let weeklyLimitReached = false;
+
+        if (result.weeklyUsedPct === 100) {
+          remainingPercent = 0;
+          usedPercent = 100;
+          weeklyLimitReached = true;
+          if (result.weeklyResetAt) {
+            resetAt = result.weeklyResetAt;
+          }
+        }
+
+        debug('claude:fetch', `parsed Usage tab → ${usedPercent}% used (${remainingPercent}% remaining)`);
         return {
           tool: 'claude-code',
           remainingPercent,
-          usedPercent: result.sessionUsedPct,
-          resetAt: result.sessionResetAt,
+          usedPercent,
+          resetAt,
+          weeklyLimitReached,
           source: 'official-cli',
         };
       }

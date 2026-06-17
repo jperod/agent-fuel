@@ -111,6 +111,8 @@ interface CodexScrapeResult {
   resetIn: string | null;
   fiveHourRemainingPct: number | null;
   fiveHourResetAt: string | null;
+  weeklyRemainingPct?: number | null;
+  weeklyResetAt?: string | null;
 }
 
 function stripAnsi(str: string): string {
@@ -156,11 +158,30 @@ function parseScrapeOutput(raw: string): CodexScrapeResult {
   const allFiveHMatches = [...clean.matchAll(/5h limit:\s*\[.*?\]\s*(\d+)%\s*left\s*\(resets\s+([^)]+)\)/gi)];
   const fiveHMatch = allFiveHMatches.at(-1) ?? null;
   
-  if (fiveHMatch) {
-    const fiveHourRemainingPct = Math.min(100, Math.max(0, parseInt(fiveHMatch[1], 10)));
-    const fiveHourResetAt = fiveHMatch[2].trim();
-    debug('codex:parse', 'result', { quotaReached: false, fiveHourRemainingPct, fiveHourResetAt, fiveHMatchRaw: fiveHMatch[0] });
-    return { quotaReached: false, resetIn: null, fiveHourRemainingPct, fiveHourResetAt };
+  const allWeeklyMatches = [...clean.matchAll(/weekly limit:\s*\[.*?\]\s*(\d+)%\s*left\s*\(resets\s+([^)]+)\)/gi)];
+  const weeklyMatch = allWeeklyMatches.at(-1) ?? null;
+
+  if (fiveHMatch || weeklyMatch) {
+    const fiveHourRemainingPct = fiveHMatch ? Math.min(100, Math.max(0, parseInt(fiveHMatch[1], 10))) : null;
+    const fiveHourResetAt = fiveHMatch ? fiveHMatch[2].trim() : null;
+    const weeklyRemainingPct = weeklyMatch ? Math.min(100, Math.max(0, parseInt(weeklyMatch[1], 10))) : null;
+    const weeklyResetAt = weeklyMatch ? weeklyMatch[2].trim() : null;
+    
+    debug('codex:parse', 'result', {
+      quotaReached: false,
+      fiveHourRemainingPct,
+      fiveHourResetAt,
+      weeklyRemainingPct,
+      weeklyResetAt,
+    });
+    return {
+      quotaReached: false,
+      resetIn: null,
+      fiveHourRemainingPct,
+      fiveHourResetAt,
+      weeklyRemainingPct,
+      weeklyResetAt,
+    };
   }
 
   // "⚠ Heads up, you have less than X% of your 5h limit left."
@@ -295,13 +316,26 @@ export class CodexQuotaAdapter implements QuotaAdapter {
         };
       }
 
-      if (result.fiveHourRemainingPct !== null) {
-        debug('codex:fetch', `parsed /status → ${result.fiveHourRemainingPct}% remaining`);
+      if (result.fiveHourRemainingPct !== null || (result.weeklyRemainingPct !== undefined && result.weeklyRemainingPct !== null)) {
+        let remainingPercent = result.fiveHourRemainingPct !== null ? result.fiveHourRemainingPct : 100;
+        let resetAt = result.fiveHourResetAt;
+        let weeklyLimitReached = false;
+
+        if (result.weeklyRemainingPct === 0) {
+          remainingPercent = 0;
+          weeklyLimitReached = true;
+          if (result.weeklyResetAt) {
+            resetAt = result.weeklyResetAt;
+          }
+        }
+
+        debug('codex:fetch', `parsed /status → ${remainingPercent}% remaining`);
         return {
           tool: 'codex',
-          remainingPercent: result.fiveHourRemainingPct,
-          usedPercent: 100 - result.fiveHourRemainingPct,
-          resetAt: result.fiveHourResetAt,
+          remainingPercent,
+          usedPercent: 100 - remainingPercent,
+          resetAt: resetAt,
+          weeklyLimitReached,
           source: 'official-cli',
         };
       }

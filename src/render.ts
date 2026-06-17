@@ -105,6 +105,10 @@ export function formatRow(snap: UsageSnapshot): string {
     parts.push(`${GRAY}[~est]${R}`);
   }
 
+  if (snap.weeklyLimitReached) {
+    parts.push(`${RED}⚠️ weekly limit${R}`);
+  }
+
   const detailStr = parts.length > 0 ? ` ${parts.join(' ')}` : '';
   const isTotal = snap.tool === 'total';
   const labelPrefix = isTotal ? `${BOLD}${CYAN}` : BOLD;

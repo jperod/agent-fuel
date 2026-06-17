@@ -180,13 +180,28 @@ function buildSnapshots(entries: ModelQuotaEntry[], fromCache: boolean): UsageSn
       return { tool, remainingPercent: null, usedPercent: null, resetAt: null, source: 'unknown' };
     }
     // Prioritise 5-hour limit if present, otherwise fallback to the worst case
+    const weeklyLimit = bucket.find(e => /weekly/i.test(e.model));
     const fiveHour = bucket.find(e => /five\s*hour|5\s*h/i.test(e.model));
     const target = fiveHour || bucket.reduce((a, b) => a.percent <= b.percent ? a : b);
+
+    let remainingPercent = target.percent;
+    let resetAt = target.refreshLine ?? null;
+    let weeklyLimitReached = false;
+
+    if (weeklyLimit && weeklyLimit.percent === 0) {
+      remainingPercent = 0;
+      weeklyLimitReached = true;
+      if (weeklyLimit.refreshLine) {
+        resetAt = weeklyLimit.refreshLine;
+      }
+    }
+
     return {
       tool,
-      remainingPercent: target.percent,
-      usedPercent: 100 - target.percent,
-      resetAt: target.refreshLine ?? null,
+      remainingPercent,
+      usedPercent: 100 - remainingPercent,
+      resetAt,
+      weeklyLimitReached,
       source,
       raw: { matchedModel: target.model, allModels: bucket.map(e => `${e.model}: ${e.percent}%`) },
     };
