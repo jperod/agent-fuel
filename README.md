@@ -50,6 +50,7 @@ AI coding assistants are now integral to developer workflows. Tools like **Claud
 4. **Scrapes TUI output directly** — Codex and AGY quotas are read by spawning the real CLIs via `expect` and parsing terminal output, so the numbers match what the tools themselves show.
 5. **Caches AGY results** — AGY quota is cached for 5 minutes so repeated runs are instant (~1s).
 6. **Renders a clean dashboard** — colour-coded bars with reset times directly in your terminal.
+7. **Handles Weekly Limit Exhaustion** — if a weekly quota is exhausted, the session quota is automatically overridden to 0% with a red `⚠️ weekly limit` warning, showing the weekly reset time.
 
 ### Project Architecture
 
@@ -72,11 +73,13 @@ agent-fuel/
 
 ```typescript
 type UsageSnapshot = {
-  tool: 'codex' | 'claude-code' | 'agy-gemini' | 'agy-other';
+  tool: 'codex' | 'claude-code' | 'agy-gemini' | 'agy-other' | 'total';
   remainingPercent: number | null;   // Unified 0–100 scale
   usedPercent?: number | null;
   resetAt?: string | null;
   source: 'official-cli' | 'ccusage' | 'local-state' | 'provider-api' | 'cache' | 'unknown';
+  isLoading?: boolean;
+  weeklyLimitReached?: boolean;
   raw?: unknown;
 };
 ```
