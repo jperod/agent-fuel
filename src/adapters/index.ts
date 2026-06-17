@@ -5,6 +5,7 @@ export interface UsageSnapshot {
   resetAt?: string | null;
   source: 'official-cli' | 'ccusage' | 'local-state' | 'provider-api' | 'cache' | 'unknown';
   isLoading?: boolean;
+  weeklyLimitReached?: boolean;
   raw?: unknown;
 }
 
