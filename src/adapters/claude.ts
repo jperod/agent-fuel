@@ -50,15 +50,29 @@ async function runClaudeScrape(): Promise<string> {
     // Open the /status panel
     tui.send('/status');
     // Wait for the status panel tabs to appear
-    await tui.waitFor(/Settings\s+Status/i, 10_000, 0);
+    const settingsScreen = await tui.waitFor(/Settings\s+Status/i, 10_000, 0);
+
+    // If we are not logged in, we can stop here and return the settings screen
+    if (/Auth token:\s*none/i.test(settingsScreen) || /Not logged in/i.test(settingsScreen)) {
+      return settingsScreen;
+    }
 
     // Navigate to the Status tab (second tab after Settings)
     tui.sendKey('Tab');
     await sleep(300);
     tui.sendKey('Tab');
 
-    // Wait for the usage bars — shows "XX% used"
-    return await tui.waitFor(/\d+%\s+used/i, 8_000, 0);
+    // Wait for the status tab content to render (shows usage bars OR stats like cost/duration)
+    screen = await tui.waitFor(/\d+%\s+used|Total cost|Total duration/i, 8_000, 0);
+
+    // If it is still loading usage data, wait for it to finish
+    const deadline = Date.now() + 6_000;
+    while (screen.includes('Loading usage data') && Date.now() < deadline) {
+      await sleep(200);
+      screen = tui.capture(0);
+    }
+
+    return screen;
 
   } finally {
     tui.kill();
@@ -89,11 +103,16 @@ interface ClaudeScrapeResult {
   sessionResetAt: string | null;
   weeklyUsedPct: number | null;
   weeklyResetAt?: string | null;
+  isApiBilling?: boolean;
+  isNotLoggedIn?: boolean;
 }
 
 function parseScrapeOutput(screen: string): ClaudeScrapeResult {
   debug('claude:parse', `screen length: ${screen.length}`);
   debug('claude:parse', 'screen', screen);
+
+  const isNotLoggedIn = /Auth token:\s*none/i.test(screen) || /Not logged in/i.test(screen);
+  const isApiBilling = /API Usage Billing/i.test(screen);
 
   // Match "XX% used" occurrences in order:
   // First = current session (5h block), second = current week
@@ -109,8 +128,8 @@ function parseScrapeOutput(screen: string): ClaudeScrapeResult {
   const sessionResetAt = resetMatches[0] ? to24h(resetMatches[0][1].trim()) : null;
   const weeklyResetAt = resetMatches[1] ? to24h(resetMatches[1][1].trim()) : null;
 
-  debug('claude:parse', 'result', { sessionUsedPct, sessionResetAt, weeklyUsedPct, weeklyResetAt });
-  return { sessionUsedPct, sessionResetAt, weeklyUsedPct, weeklyResetAt };
+  debug('claude:parse', 'result', { sessionUsedPct, sessionResetAt, weeklyUsedPct, weeklyResetAt, isApiBilling, isNotLoggedIn });
+  return { sessionUsedPct, sessionResetAt, weeklyUsedPct, weeklyResetAt, isApiBilling, isNotLoggedIn };
 }
 
 // ── Adapter ────────────────────────────────────────────────────────────────
@@ -133,6 +152,28 @@ export class ClaudeQuotaAdapter implements QuotaAdapter {
     try {
       const screen = await runClaudeScrape();
       const result = parseScrapeOutput(screen);
+
+      if (result.isNotLoggedIn) {
+        debug('claude:fetch', 'detected not logged in');
+        return {
+          tool: 'claude-code',
+          remainingPercent: null,
+          usedPercent: null,
+          resetAt: 'not logged in',
+          source: 'unknown',
+        };
+      }
+
+      if (result.isApiBilling) {
+        debug('claude:fetch', 'detected API Usage Billing');
+        return {
+          tool: 'claude-code',
+          remainingPercent: 100,
+          usedPercent: 0,
+          resetAt: 'billing active',
+          source: 'official-cli',
+        };
+      }
 
       if (result.sessionUsedPct !== null) {
         let remainingPercent = Math.max(0, 100 - result.sessionUsedPct);
