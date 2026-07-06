@@ -54,6 +54,12 @@ function formatResetAt(resetAt: string): string {
   if (resetAt.toLowerCase().includes('available')) {
     return `${GREEN}✓ quota available${R}`;
   }
+  if (resetAt.toLowerCase().includes('billing active')) {
+    return `${GREEN}✓ billing active${R}`;
+  }
+  if (resetAt.toLowerCase().includes('not logged in')) {
+    return `${RED}✗ not logged in${R}`;
+  }
   const codexMatch = resetAt.match(/^Resets in\s*(.+)/i);
   if (codexMatch) {
     return `${GRAY}(resets in ${codexMatch[1]})${R}`;
