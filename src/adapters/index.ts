@@ -6,6 +6,11 @@ export interface UsageSnapshot {
   source: 'official-cli' | 'ccusage' | 'local-state' | 'provider-api' | 'cache' | 'unknown';
   isLoading?: boolean;
   weeklyLimitReached?: boolean;
+  limitType?: 'session' | 'weekly';
+  breakdown?: {
+    fiveHour: number | null;
+    weekly: number | null;
+  };
   raw?: unknown;
 }
 
