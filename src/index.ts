@@ -7,6 +7,10 @@ import { AgyQuotaAdapter } from './adapters/agy.js';
 import { UsageSnapshot } from './adapters/index.js';
 import { printHeader, printFooter, formatRow, getDisplayName, SHADE_CHAR } from './render.js';
 import { loadConfig, handleConfigCommand } from './config.js';
+import { checkUpdateBackground, promptAndUpgrade, runUpdateCheckNow } from './update.js';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+import fs from 'node:fs';
 
 // Fixed display order — never changes regardless of which adapter resolves first
 const SLOT_ORDER = ['claude-code', 'codex', 'agy-gemini', 'agy-other'] as const;
@@ -129,11 +133,30 @@ function redraw(
   }
 }
 
+function loadPackageVersion(): string {
+  try {
+    const dir = path.dirname(fileURLToPath(import.meta.url));
+    const pkg = JSON.parse(fs.readFileSync(path.join(dir, '../package.json'), 'utf8'));
+    return pkg.version;
+  } catch {
+    return '0.6.0';
+  }
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
+
+  const currentVersion = loadPackageVersion();
+  if (args.includes('--check-update-now')) {
+    await runUpdateCheckNow(currentVersion);
+    return;
+  }
+
   if (handleConfigCommand(args)) {
     return;
   }
+
+  const updateVersion = checkUpdateBackground(currentVersion);
 
   const claudeAdapter = new ClaudeQuotaAdapter();
   const codexAdapter  = new CodexQuotaAdapter();
@@ -184,6 +207,10 @@ async function main(): Promise<void> {
   if (spinnerTimer) clearInterval(spinnerTimer);
   redraw(slots, emitted, snapshots); // final clean repaint with all data
   printFooter();
+
+  if (updateVersion) {
+    await promptAndUpgrade(updateVersion);
+  }
 }
 
 main().catch((error) => {
