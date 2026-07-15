@@ -32,11 +32,16 @@ npm link
 
 ## 💡 The Motivation
 
-AI coding assistants are now integral to developer workflows. Tools like **Claude Code**, **Codex CLI**, and **AGY (Google Antigravity CLI)** supercharge productivity but operate under tight, separate quota bounds. Developers are forced to jump through interactive prompts or scrape configuration screens just to answer:
+AI coding assistants are now integral to developer workflows. Modern developers often rely on **multiple agentic CLI tools** simultaneously (like _Claude Code_, _Codex CLI_, and _Google Antigravity CLI_ — aka **AGY**, via the `agy` terminal command), switching back and forth between them depending on the task.
 
-> **"How much agent fuel do I have left before starting this massive refactor?"**
+However, keeping track of their limits is a hassle due to two main reasons:
 
-**Agent Fuel** solves this by acting as a lightweight, adapter-based abstraction layer that normalises all coding agent quotas into a single metric: **Percent Remaining**.
+1. **Fragmented Quotas**: Each tool runs on its own separate limits (some 5-hour sessions, some weekly limits) with no unified dashboard.
+2. **Conflicting Conventions (Directionality)**: Different CLIs represent usage differently. Some measure **remaining capacity** (counting downwards, e.g., Codex or AGY's "X% left"), while others measure **consumed resources** (counting upwards, e.g., Claude Code's "Y% used"). A number like `51%` can mean completely opposite states depending on the tool.
+
+**Agent Fuel** solves this by acting as a lightweight, adapter-based abstraction layer that normalises all coding agent quotas into a single, unambiguous metric: **Percent Remaining**.
+
+Built with an extensible adapter architecture, Agent Fuel provides a single unified pane of glass for all your active CLIs, and is designed to easily scale to support new agentic developer tools as they emerge in the future.
 
 ---
 
@@ -73,14 +78,20 @@ agent-fuel/
 
 ```typescript
 type UsageSnapshot = {
-  tool: 'codex' | 'claude-code' | 'agy-gemini' | 'agy-other' | 'total';
-  remainingPercent: number | null;   // Unified 0–100 scale
+  tool: "codex" | "claude-code" | "agy-gemini" | "agy-other" | "total";
+  remainingPercent: number | null; // Unified 0–100 scale
   usedPercent?: number | null;
   resetAt?: string | null;
-  source: 'official-cli' | 'ccusage' | 'local-state' | 'provider-api' | 'cache' | 'unknown';
+  source:
+    | "official-cli"
+    | "ccusage"
+    | "local-state"
+    | "provider-api"
+    | "cache"
+    | "unknown";
   isLoading?: boolean;
   weeklyLimitReached?: boolean;
-  limitType?: 'session' | 'weekly';
+  limitType?: "session" | "weekly";
   breakdown?: {
     fiveHour: number | null;
     weekly: number | null;
@@ -117,6 +128,7 @@ agent-fuel v0.6.0
 ## ⚙️ Configuration & Custom Weights
 
 Different developers operate under different quota sizes. By default, `agent-fuel` weights each provider bucket as standard proxies for monthly dollar subscription amounts:
+
 - Claude Code (`claude-code`): `20`
 - Codex CLI (`codex`): `20`
 - AGY Gemini (`agy-gemini`): `10`
@@ -128,15 +140,15 @@ If a provider is completely unused or fails to return a quota percentage, its we
 
 You can view or update your weights and settings directly using the CLI:
 
-* **View Active Configuration**:
+- **View Active Configuration**:
   ```bash
   agent-fuel config
   ```
-* **Change Provider Weight**:
+- **Change Provider Weight**:
   ```bash
   agent-fuel config set claude-code 50
   ```
-* **Disable/Enable Total Bar**:
+- **Disable/Enable Total Bar**:
   ```bash
   agent-fuel config set show-total false
   ```
@@ -149,14 +161,14 @@ Settings are persistently saved to `~/.config/agent-fuel/config.json`.
 
 Environment variables take highest precedence and override any values saved in the config JSON file:
 
-| Variable | Default | Description |
-|---|---|---|
-| `AGENT_FUEL_CLAUDE_BUDGET` | `20.0` | Claude Code rolling budget in USD |
-| `AGENT_FUEL_CODEX_BUDGET` | `20.0` | **Fallback estimate only** — Codex rolling budget in USD |
-| `AGENT_FUEL_WEIGHT_CLAUDE` | `20` | Weight size ratio of the Claude Code quota pool |
-| `AGENT_FUEL_WEIGHT_CODEX` | `20` | Weight size ratio of the Codex quota pool |
-| `AGENT_FUEL_WEIGHT_AGY_GEMINI` | `10` | Weight size ratio of the AGY Gemini quota pool |
-| `AGENT_FUEL_WEIGHT_AGY_OTHER` | `10` | Weight size ratio of the AGY Other quota pool |
-| `AGENT_FUEL_SHOW_TOTAL` | `true` | Show or hide the consolidated Total quota bar (`true`/`false`) |
+| Variable                       | Default | Description                                                    |
+| ------------------------------ | ------- | -------------------------------------------------------------- |
+| `AGENT_FUEL_CLAUDE_BUDGET`     | `20.0`  | Claude Code rolling budget in USD                              |
+| `AGENT_FUEL_CODEX_BUDGET`      | `20.0`  | **Fallback estimate only** — Codex rolling budget in USD       |
+| `AGENT_FUEL_WEIGHT_CLAUDE`     | `20`    | Weight size ratio of the Claude Code quota pool                |
+| `AGENT_FUEL_WEIGHT_CODEX`      | `20`    | Weight size ratio of the Codex quota pool                      |
+| `AGENT_FUEL_WEIGHT_AGY_GEMINI` | `10`    | Weight size ratio of the AGY Gemini quota pool                 |
+| `AGENT_FUEL_WEIGHT_AGY_OTHER`  | `10`    | Weight size ratio of the AGY Other quota pool                  |
+| `AGENT_FUEL_SHOW_TOTAL`        | `true`  | Show or hide the consolidated Total quota bar (`true`/`false`) |
 
 > **Note on `AGENT_FUEL_CODEX_BUDGET`:** Codex quota is read directly from the Codex TUI via `expect` scraping. This variable is only used as a rough fallback estimate (shown as `[~est]`) when the TUI reports no quota warning and a percentage cannot be determined. It is a guess based on local session cost data — not an official Codex quota signal. The TUI scrape is always preferred.
