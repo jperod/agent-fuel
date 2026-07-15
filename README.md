@@ -32,12 +32,13 @@ npm link
 
 ## 💡 The Motivation
 
-AI coding assistants are now integral to developer workflows. Modern developers often rely on **multiple agentic CLI tools** simultaneously (like _Claude Code_, _Codex CLI_, and _Google Antigravity CLI_ — aka **AGY**, via the `agy` terminal command), switching back and forth between them depending on the task.
+AI coding assistants are now integral to developer workflows. Modern developers often use **multiple agentic CLI tools interchangeably** (such as **Claude Code**, **Codex CLI**, and **Google Antigravity CLI** — aka **AGY**, run via the `agy` command), switching back and forth depending on the task.
 
-However, keeping track of their limits is a hassle due to two main reasons:
+However, keeping track of your remaining fuel is a major hassle due to three reasons:
 
-1. **Fragmented Quotas**: Each tool runs on its own separate limits (some 5-hour sessions, some weekly limits) with no unified dashboard.
+1. **Fragmented Quotas**: Each tool operates on its own isolated limit system (e.g., short-term 5-hour sessions or long-term weekly buckets) without any central tracking.
 2. **Conflicting Conventions (Directionality)**: Different CLIs represent usage differently. Some measure **remaining capacity** (counting downwards, e.g., Codex or AGY's "X% left"), while others measure **consumed resources** (counting upwards, e.g., Claude Code's "Y% used"). A number like `51%` can mean completely opposite states depending on the tool.
+3. **Avoiding Provider Lock-In**: To avoid ecosystem lock-in, developers naturally want to use a mix of tools (such as Claude Code, Codex, and AGY interchangeably for all their coding tasks). This standard practice forces you to manually manage and calculate completely separate and unrelated quota limits.
 
 **Agent Fuel** solves this by acting as a lightweight, adapter-based abstraction layer that normalises all coding agent quotas into a single, unambiguous metric: **Percent Remaining**.
 
