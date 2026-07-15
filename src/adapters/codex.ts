@@ -316,25 +316,33 @@ export class CodexQuotaAdapter implements QuotaAdapter {
         };
       }
 
-      if (result.fiveHourRemainingPct !== null || (result.weeklyRemainingPct !== undefined && result.weeklyRemainingPct !== null)) {
-        let remainingPercent = result.fiveHourRemainingPct !== null ? result.fiveHourRemainingPct : 100;
-        let resetAt = result.fiveHourResetAt;
-        let weeklyLimitReached = false;
+      const limits: { pct: number; reset: string | null; type: 'session' | 'weekly' }[] = [];
+      if (result.fiveHourRemainingPct !== null) {
+        limits.push({ pct: result.fiveHourRemainingPct, reset: result.fiveHourResetAt, type: 'session' });
+      }
+      if (result.weeklyRemainingPct !== undefined && result.weeklyRemainingPct !== null) {
+        limits.push({ pct: result.weeklyRemainingPct, reset: result.weeklyResetAt ?? null, type: 'weekly' });
+      }
 
-        if (result.weeklyRemainingPct === 0) {
-          remainingPercent = 0;
-          weeklyLimitReached = true;
-          if (result.weeklyResetAt) {
-            resetAt = result.weeklyResetAt;
-          }
-        }
+      if (limits.length > 0) {
+        limits.sort((a, b) => a.pct - b.pct);
+        const limiting = limits[0];
 
-        debug('codex:fetch', `parsed /status → ${remainingPercent}% remaining`);
+        const remainingPercent = limiting.pct;
+        const resetAt = limiting.reset;
+        const weeklyLimitReached = result.weeklyRemainingPct === 0;
+
+        debug('codex:fetch', `parsed /status → ${remainingPercent}% remaining (limiting factor: ${limiting.type})`);
         return {
           tool: 'codex',
           remainingPercent,
           usedPercent: 100 - remainingPercent,
-          resetAt: resetAt,
+          resetAt,
+          limitType: limiting.type,
+          breakdown: (result.fiveHourRemainingPct !== null && result.weeklyRemainingPct !== undefined && result.weeklyRemainingPct !== null) ? {
+            fiveHour: result.fiveHourRemainingPct,
+            weekly: result.weeklyRemainingPct,
+          } : undefined,
           weeklyLimitReached,
           source: 'official-cli',
         };

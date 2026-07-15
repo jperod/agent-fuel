@@ -1,6 +1,6 @@
 {
   "name": "agent-fuel",
-  "version": "0.5.8",
+  "version": "0.6.0",
   "description": "Sleek term-based dashboard for AI coding CLI quotas",
   "type": "module",
   "main": "dist/index.js",
@@ -27,6 +27,14 @@
   ],
   "author": "Pedro Rodrigues",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jperod/agent-fuel.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jperod/agent-fuel/issues"
+  },
+  "homepage": "https://github.com/jperod/agent-fuel#readme",
   "devDependencies": {
     "@types/node": "^25.9.1",
     "typescript": "^6.0.3"

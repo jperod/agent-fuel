@@ -175,27 +175,36 @@ export class ClaudeQuotaAdapter implements QuotaAdapter {
         };
       }
 
-      if (result.sessionUsedPct !== null) {
-        let remainingPercent = Math.max(0, 100 - result.sessionUsedPct);
-        let usedPercent = result.sessionUsedPct;
-        let resetAt = result.sessionResetAt;
-        let weeklyLimitReached = false;
+      const sessionRemaining = result.sessionUsedPct !== null ? Math.max(0, 100 - result.sessionUsedPct) : null;
+      const weeklyRemaining = result.weeklyUsedPct !== null ? Math.max(0, 100 - result.weeklyUsedPct) : null;
 
-        if (result.weeklyUsedPct === 100) {
-          remainingPercent = 0;
-          usedPercent = 100;
-          weeklyLimitReached = true;
-          if (result.weeklyResetAt) {
-            resetAt = result.weeklyResetAt;
-          }
-        }
+      const limits: { pct: number; reset: string | null; type: 'session' | 'weekly' }[] = [];
+      if (sessionRemaining !== null) {
+        limits.push({ pct: sessionRemaining, reset: result.sessionResetAt, type: 'session' });
+      }
+      if (weeklyRemaining !== null) {
+        limits.push({ pct: weeklyRemaining, reset: result.weeklyResetAt ?? null, type: 'weekly' });
+      }
 
-        debug('claude:fetch', `parsed Usage tab → ${usedPercent}% used (${remainingPercent}% remaining)`);
+      if (limits.length > 0) {
+        limits.sort((a, b) => a.pct - b.pct);
+        const limiting = limits[0];
+
+        const remainingPercent = limiting.pct;
+        const usedPercent = 100 - remainingPercent;
+        const resetAt = limiting.reset;
+        const weeklyLimitReached = weeklyRemaining === 0;
+
         return {
           tool: 'claude-code',
           remainingPercent,
           usedPercent,
           resetAt,
+          limitType: limiting.type,
+          breakdown: (sessionRemaining !== null && weeklyRemaining !== null) ? {
+            fiveHour: sessionRemaining,
+            weekly: weeklyRemaining,
+          } : undefined,
           weeklyLimitReached,
           source: 'official-cli',
         };

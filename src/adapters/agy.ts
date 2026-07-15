@@ -179,31 +179,43 @@ function buildSnapshots(entries: ModelQuotaEntry[], fromCache: boolean): UsageSn
     if (bucket.length === 0) {
       return { tool, remainingPercent: null, usedPercent: null, resetAt: null, source: 'unknown' };
     }
-    // Prioritise 5-hour limit if present, otherwise fallback to the worst case
+
     const weeklyLimit = bucket.find(e => /weekly/i.test(e.model));
     const fiveHour = bucket.find(e => /five\s*hour|5\s*h/i.test(e.model));
-    const target = fiveHour || bucket.reduce((a, b) => a.percent <= b.percent ? a : b);
 
-    let remainingPercent = target.percent;
-    let resetAt = target.refreshLine ?? null;
-    let weeklyLimitReached = false;
-
-    if (weeklyLimit && weeklyLimit.percent === 0) {
-      remainingPercent = 0;
-      weeklyLimitReached = true;
-      if (weeklyLimit.refreshLine) {
-        resetAt = weeklyLimit.refreshLine;
-      }
+    const limits: { pct: number; reset: string | null; type: 'session' | 'weekly'; model: string }[] = [];
+    if (fiveHour) {
+      limits.push({ pct: fiveHour.percent, reset: fiveHour.refreshLine ?? null, type: 'session', model: fiveHour.model });
     }
+    if (weeklyLimit) {
+      limits.push({ pct: weeklyLimit.percent, reset: weeklyLimit.refreshLine ?? null, type: 'weekly', model: weeklyLimit.model });
+    }
+
+    if (limits.length === 0) {
+      const target = bucket.reduce((a, b) => a.percent <= b.percent ? a : b);
+      limits.push({ pct: target.percent, reset: target.refreshLine ?? null, type: 'session', model: target.model });
+    }
+
+    limits.sort((a, b) => a.pct - b.pct);
+    const limiting = limits[0];
+
+    const remainingPercent = limiting.pct;
+    const resetAt = limiting.reset;
+    const weeklyLimitReached = weeklyLimit ? weeklyLimit.percent === 0 : false;
 
     return {
       tool,
       remainingPercent,
       usedPercent: 100 - remainingPercent,
       resetAt,
+      limitType: limiting.type,
+      breakdown: (fiveHour && weeklyLimit) ? {
+        fiveHour: fiveHour.percent,
+        weekly: weeklyLimit.percent,
+      } : undefined,
       weeklyLimitReached,
       source,
-      raw: { matchedModel: target.model, allModels: bucket.map(e => `${e.model}: ${e.percent}%`) },
+      raw: { matchedModel: limiting.model, allModels: bucket.map(e => `${e.model}: ${e.percent}%`) },
     };
   }
 

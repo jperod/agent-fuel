@@ -97,12 +97,23 @@ export function formatRow(snap: UsageSnapshot): string {
 
   const parts: string[] = [];
 
+  if (snap.breakdown) {
+    parts.push(`${GRAY}(5h: ${snap.breakdown.fiveHour}% | wk: ${snap.breakdown.weekly}%)${R}`);
+  } else {
+    if (snap.limitType === 'weekly' && snap.tool !== 'agy-gemini' && snap.tool !== 'agy-other') {
+      parts.push(`${GRAY}[weekly]${R}`);
+    } else if (snap.limitType === 'session' && snap.tool !== 'agy-gemini' && snap.tool !== 'agy-other') {
+      parts.push(`${GRAY}[session]${R}`);
+    }
+  }
+
   if (snap.resetAt) parts.push(formatResetAt(snap.resetAt));
 
   if ((snap.tool === 'agy-gemini' || snap.tool === 'agy-other') &&
        snap.raw && typeof snap.raw === 'object') {
-    const label = (snap.raw as Record<string, unknown>).matchedModel;
+    let label = (snap.raw as Record<string, unknown>).matchedModel;
     if (typeof label === 'string' && label) {
+      label = label.replace(/\s*-\s*(?:weekly|five\s*hour|5\s*h)\s*limit/i, '');
       parts.push(`${GRAY}[${label}]${R}`);
     }
   }
