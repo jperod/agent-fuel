@@ -115,7 +115,7 @@ Codex         [█████████████████████�
 AGY Gemini    [███████████████████████░░░░░░░]  77% remaining (5h: 88% | wk: 77%) (resets in 116h 10m) [GEMINI MODELS]
 AGY Other     [██████████████████████████████] 100% remaining (5h: 100% | wk: 100%) ✓ quota available [CLAUDE AND GPT MODELS]
 
-agent-fuel v0.6.0
+agent-fuel v0.7.1
 ```
 
 - **Total** bar prints on top (in TTY interactive mode) showing the weighted consolidated remaining quota. The bar and percentage represent the true bottleneck (minimum) remaining capacity.

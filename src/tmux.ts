@@ -84,6 +84,7 @@ export class TuiScraper {
     debug('tmux', `starting session ${this.sessionId} for command: ${this.command}`);
     execFileSync('tmux', [
       'new-session', '-d', '-s', this.sessionId,
+      '-c', process.cwd(),
       '-x', String(this.width), '-y', String(this.height),
       this.command,
     ], { stdio: 'ignore', timeout: 5000 });

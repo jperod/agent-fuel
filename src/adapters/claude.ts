@@ -67,7 +67,12 @@ async function runClaudeScrape(): Promise<string> {
 
     // If it is still loading usage data, wait for it to finish
     const deadline = Date.now() + 6_000;
-    while (screen.includes('Loading usage data') && Date.now() < deadline) {
+    while (
+      (screen.includes('Loading usage data') ||
+       screen.includes('Scanning local sessions') ||
+       screen.includes('Refreshing')) &&
+      Date.now() < deadline
+    ) {
       await sleep(200);
       screen = tui.capture(0);
     }
@@ -114,19 +119,50 @@ function parseScrapeOutput(screen: string): ClaudeScrapeResult {
   const isNotLoggedIn = /Auth token:\s*none/i.test(screen) || /Not logged in/i.test(screen);
   const isApiBilling = /API Usage Billing/i.test(screen);
 
-  // Match "XX% used" occurrences in order:
-  // First = current session (5h block), second = current week
-  const usedMatches = [...screen.matchAll(/(\d+)%\s+used/gi)];
-  debug('claude:parse', `found ${usedMatches.length} "% used" matches`);
+  const lines = screen.split(/\r?\n/).map(l => l.trim());
 
-  const sessionUsedPct = usedMatches[0] ? parseInt(usedMatches[0][1], 10) : null;
-  const weeklyUsedPct  = usedMatches[1] ? parseInt(usedMatches[1][1], 10) : null;
+  let sessionUsedPct: number | null = null;
+  let sessionResetAt: string | null = null;
+  let weeklyUsedPct: number | null = null;
+  let weeklyResetAt: string | null = null;
 
-  // Reset time: "Resets H:MMam" or "Resets May 30 at 6am" — grab all occurrences,
-  // then normalise any 12h am/pm component to 24h (e.g. "11:10pm" → "23:10").
-  const resetMatches = [...screen.matchAll(/Resets\s+([^\n\r]+)/gi)];
-  const sessionResetAt = resetMatches[0] ? to24h(resetMatches[0][1].trim()) : null;
-  const weeklyResetAt = resetMatches[1] ? to24h(resetMatches[1][1].trim()) : null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const usedMatch = line.match(/(\d+)%\s+used/i);
+    if (usedMatch) {
+      const pct = parseInt(usedMatch[1], 10);
+      
+      let type: 'session' | 'weekly' | null = null;
+      for (let j = Math.max(0, i - 3); j < i; j++) {
+        if (/Current session/i.test(lines[j])) {
+          type = 'session';
+          break;
+        } else if (/Current week/i.test(lines[j])) {
+          type = 'weekly';
+          break;
+        }
+      }
+
+      let resetVal: string | null = null;
+      for (let j = i + 1; j <= Math.min(lines.length - 1, i + 3); j++) {
+        const resetMatch = lines[j].match(/Resets\s+([^\n\r]+)/i);
+        if (resetMatch) {
+          resetVal = to24h(resetMatch[1].trim());
+          break;
+        }
+      }
+
+      if (type === 'session') {
+        sessionUsedPct = pct;
+        if (resetVal) sessionResetAt = resetVal;
+      } else if (type === 'weekly') {
+        if (weeklyUsedPct === null || pct > weeklyUsedPct) {
+          weeklyUsedPct = pct;
+          if (resetVal) weeklyResetAt = resetVal;
+        }
+      }
+    }
+  }
 
   debug('claude:parse', 'result', { sessionUsedPct, sessionResetAt, weeklyUsedPct, weeklyResetAt, isApiBilling, isNotLoggedIn });
   return { sessionUsedPct, sessionResetAt, weeklyUsedPct, weeklyResetAt, isApiBilling, isNotLoggedIn };
