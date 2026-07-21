@@ -143,7 +143,12 @@ export function printRow(snap: UsageSnapshot): void {
 }
 
 export function printFooter(): void {
-  console.log(`\n${GRAY}agent-fuel${loadVersion()}${R}\n`);
+  const timeStr = new Date().toLocaleTimeString(undefined, {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+  console.log(`\n${GRAY}agent-fuel${loadVersion()} • Last refreshed at: ${timeStr}${R}\n`);
 }
 
 export const LOADING_LINE = `${GRAY}loading...${R}`;
