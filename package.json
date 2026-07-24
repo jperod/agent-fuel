@@ -1,7 +1,7 @@
 {
   "name": "agent-fuel",
   "version": "0.7.2",
-  "description": "Sleek term-based dashboard for AI coding CLI quotas",
+  "description": "Monitor AI coding assistant quotas, credits & token usage — Claude Code, Codex, Antigravity (AGY) unified CLI dashboard",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -23,7 +23,21 @@
     "dashboard",
     "claude",
     "codex",
-    "agy"
+    "agy",
+    "cli",
+    "token-usage",
+    "credits",
+    "monitor",
+    "tracker",
+    "claude-code",
+    "antigravity",
+    "usage",
+    "terminal",
+    "developer-tools",
+    "ai-tools",
+    "quota-monitor",
+    "ai-coding-assistant",
+    "usage-tracker"
   ],
   "author": "Pedro Rodrigues",
   "license": "MIT",

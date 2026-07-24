@@ -1,6 +1,12 @@
-# ⚡️ Agent Fuel (`agent-fuel`)
+# ⚡️ Agent Fuel — AI Coding CLI Quota & Token Usage Monitor
 
-A sleek, unified CLI dashboard to monitor your AI coding assistant quotas, credits, and token usage in real-time.
+> **Track and monitor token usage, credits, and quota limits** for your AI coding assistants — Claude Code, Codex CLI, and Antigravity/AGY — in a single unified terminal dashboard.
+
+[![npm version](https://img.shields.io/npm/v/agent-fuel.svg)](https://www.npmjs.com/package/agent-fuel)
+[![npm downloads](https://img.shields.io/npm/dm/agent-fuel.svg)](https://www.npmjs.com/package/agent-fuel)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+`agent-fuel` is a lightweight npm CLI tool that gives you a **real-time unified view of AI agent quota usage** across Claude Code, Codex, and AGY (Google Antigravity CLI) — so you always know how much AI fuel you have left without switching between tools.
 
 ---
 
@@ -27,6 +33,20 @@ npm install
 npm run build
 npm link
 ```
+
+---
+
+## 🔍 What Problem Does This Solve?
+
+If you use **multiple AI coding assistants** (like Claude Code, Codex CLI, and Google's Antigravity CLI `agy`), you know the pain:
+
+- **Fragmented quota tracking**: each tool has separate credit limits with no central view
+- **Inconsistent direction**: some tools show *remaining* %, others show *consumed* % — impossible to compare at a glance
+- **Constant context-switching**: you have to check 3+ CLIs just to know how much quota you have left
+
+**Agent Fuel** solves this with one command: `agent-fuel`. It normalises all limits into a single **Percent Remaining** metric and streams them live in one terminal dashboard.
+
+> **Supports:** Claude Code · Codex CLI (OpenAI) · Antigravity CLI (AGY / Google Gemini)
 
 ---
 
