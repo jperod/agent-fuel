@@ -1,6 +1,6 @@
 {
   "name": "agent-fuel",
-  "version": "0.7.2",
+  "version": "0.8.0",
   "description": "Monitor AI coding assistant quotas, credits & token usage — Claude Code, Codex, Antigravity (AGY) unified CLI dashboard",
   "type": "module",
   "main": "dist/index.js",

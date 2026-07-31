@@ -64,11 +64,22 @@ function registerSignalHandlers(): void {
 }
 registerSignalHandlers(); // called at import time — guarded by signalsRegistered flag
 
+import os from 'node:os';
+import path from 'node:path';
+
+function expandTilde(p: string): string {
+  if (p.startsWith('~/') || p === '~') {
+    return path.join(os.homedir(), p.slice(1));
+  }
+  return p;
+}
+
 export class TuiScraper {
   readonly sessionId: string;
 
   constructor(
     private readonly command: string,
+    private readonly env?: Record<string, string>,
     private readonly width = 220,
     private readonly height = 50,
   ) {
@@ -81,13 +92,29 @@ export class TuiScraper {
     } catch {
       throw new Error('tmux not found — install with: brew install tmux');
     }
-    debug('tmux', `starting session ${this.sessionId} for command: ${this.command}`);
-    execFileSync('tmux', [
+
+    let envPrefix = '';
+    if (this.env && Object.keys(this.env).length > 0) {
+      envPrefix = 'env ' + Object.entries(this.env)
+        .map(([k, v]) => `${k}=${expandTilde(v)}`)
+        .join(' ') + ' ';
+    }
+
+    const fullCmd = `${envPrefix}${this.command}`;
+    const userShell = process.env.SHELL || '/bin/sh';
+
+    debug('tmux', `starting session ${this.sessionId} for command: ${fullCmd} via shell ${userShell}`);
+
+    // If fullCmd is simple and has no custom env or spaces/aliases, run directly;
+    // otherwise wrap in userShell -i -c "..." so aliases from ~/.zshrc or ~/.bashrc resolve
+    const runArgs = [
       'new-session', '-d', '-s', this.sessionId,
       '-c', process.cwd(),
       '-x', String(this.width), '-y', String(this.height),
-      this.command,
-    ], { stdio: 'ignore', timeout: 5000 });
+      `${userShell} -i -c ${JSON.stringify(fullCmd)}`,
+    ];
+
+    execFileSync('tmux', runArgs, { stdio: 'ignore', timeout: 5000 });
     activeScrapers.add(this);
   }
 

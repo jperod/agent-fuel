@@ -2,26 +2,51 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
+export type ToolType = 'claude' | 'codex' | 'agy';
+
+export interface AccountConfig {
+  id: string;
+  displayName: string;
+  type: ToolType;
+  command?: string;
+  env?: Record<string, string>;
+  weight: number;
+}
+
 export interface Config {
-  weights: {
-    'claude-code': number;
-    'codex': number;
-    'agy-gemini': number;
-    'agy-other': number;
-  };
+  accounts: AccountConfig[];
   showTotal: boolean;
 }
 
 export const CONFIG_DIR = path.join(os.homedir(), '.config', 'agent-fuel');
 export const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 
-export const DEFAULT_CONFIG: Config = {
-  weights: {
-    'claude-code': 20,
-    'codex': 20,
-    'agy-gemini': 10,
-    'agy-other': 10,
+export const DEFAULT_ACCOUNTS: AccountConfig[] = [
+  {
+    id: 'claude-code',
+    displayName: 'Claude Code',
+    type: 'claude',
+    command: 'claude',
+    weight: 20,
   },
+  {
+    id: 'codex',
+    displayName: 'Codex',
+    type: 'codex',
+    command: 'codex',
+    weight: 20,
+  },
+  {
+    id: 'agy',
+    displayName: 'AGY',
+    type: 'agy',
+    command: 'agy',
+    weight: 20,
+  },
+];
+
+export const DEFAULT_CONFIG: Config = {
+  accounts: DEFAULT_ACCOUNTS,
   showTotal: true,
 };
 
@@ -31,12 +56,15 @@ function ensureDir(dir: string): void {
       fs.mkdirSync(dir, { recursive: true });
     }
   } catch {
-    // Ignore, let write fail if it must
+    // Ignore
   }
 }
 
 export function loadConfig(): Config {
-  const config = { ...DEFAULT_CONFIG, weights: { ...DEFAULT_CONFIG.weights } };
+  let config: Config = {
+    accounts: DEFAULT_ACCOUNTS.map(a => ({ ...a })),
+    showTotal: true,
+  };
 
   // 1. Read from config file
   try {
@@ -45,14 +73,47 @@ export function loadConfig(): Config {
       const parsed = JSON.parse(content);
       
       if (parsed && typeof parsed === 'object') {
-        if (parsed.weights && typeof parsed.weights === 'object') {
-          for (const key of ['claude-code', 'codex', 'agy-gemini', 'agy-other'] as const) {
-            const w = parsed.weights[key];
-            if (typeof w === 'number' && Number.isFinite(w) && w >= 0) {
-              config.weights[key] = w;
-            }
-          }
+        if (Array.isArray(parsed.accounts) && parsed.accounts.length > 0) {
+          config.accounts = parsed.accounts.map((ac: any) => ({
+            id: String(ac.id || ac.displayName || 'account'),
+            displayName: String(ac.displayName || ac.id || 'Account'),
+            type: (['claude', 'codex', 'agy'].includes(ac.type) ? ac.type : 'claude') as ToolType,
+            command: ac.command ? String(ac.command) : undefined,
+            env: ac.env && typeof ac.env === 'object' ? ac.env : undefined,
+            weight: typeof ac.weight === 'number' && Number.isFinite(ac.weight) && ac.weight >= 0 ? ac.weight : 20,
+          }));
+        } else if (parsed.weights && typeof parsed.weights === 'object') {
+          // Migration path from legacy weights config
+          const legacyClaude = parsed.weights['claude-code'] ?? 20;
+          const legacyCodex = parsed.weights['codex'] ?? 20;
+          const legacyAgyGemini = parsed.weights['agy-gemini'] ?? 10;
+          const legacyAgyOther = parsed.weights['agy-other'] ?? 10;
+
+          config.accounts = [
+            {
+              id: 'claude-code',
+              displayName: 'Claude Code',
+              type: 'claude',
+              command: 'claude',
+              weight: legacyClaude,
+            },
+            {
+              id: 'codex',
+              displayName: 'Codex',
+              type: 'codex',
+              command: 'codex',
+              weight: legacyCodex,
+            },
+            {
+              id: 'agy',
+              displayName: 'AGY',
+              type: 'agy',
+              command: 'agy',
+              weight: legacyAgyGemini + legacyAgyOther,
+            },
+          ];
         }
+
         if (typeof parsed.showTotal === 'boolean') {
           config.showTotal = parsed.showTotal;
         }
@@ -62,31 +123,7 @@ export function loadConfig(): Config {
     // Fail silently, use defaults
   }
 
-  // 2. Read from Environment Variables
-  const envClaude = process.env.AGENT_FUEL_WEIGHT_CLAUDE_CODE ?? process.env.AGENT_FUEL_WEIGHT_CLAUDE;
-  if (envClaude) {
-    const val = Number(envClaude);
-    if (Number.isFinite(val) && val >= 0) config.weights['claude-code'] = val;
-  }
-
-  const envCodex = process.env.AGENT_FUEL_WEIGHT_CODEX;
-  if (envCodex) {
-    const val = Number(envCodex);
-    if (Number.isFinite(val) && val >= 0) config.weights['codex'] = val;
-  }
-
-  const envGemini = process.env.AGENT_FUEL_WEIGHT_AGY_GEMINI ?? process.env.AGENT_FUEL_WEIGHT_GEMINI;
-  if (envGemini) {
-    const val = Number(envGemini);
-    if (Number.isFinite(val) && val >= 0) config.weights['agy-gemini'] = val;
-  }
-
-  const envOther = process.env.AGENT_FUEL_WEIGHT_AGY_OTHER ?? process.env.AGENT_FUEL_WEIGHT_OTHER;
-  if (envOther) {
-    const val = Number(envOther);
-    if (Number.isFinite(val) && val >= 0) config.weights['agy-other'] = val;
-  }
-
+  // 2. Read from Environment Variables overrides
   const envShowTotal = process.env.AGENT_FUEL_SHOW_TOTAL;
   if (envShowTotal) {
     if (envShowTotal.toLowerCase() === 'true') config.showTotal = true;
@@ -120,82 +157,181 @@ export function handleConfigCommand(args: string[]): boolean {
   const GRAY = '\x1b[90m';
 
   const config = loadConfig();
-
   const subCommand = args[1]?.toLowerCase();
 
   if (!subCommand || subCommand === 'list') {
     console.log(`\n${BOLD}${CYAN}⚡️ Agent Fuel Configuration${R}`);
     console.log(`${GRAY}Config file: ${CONFIG_FILE}${R}\n`);
     
-    console.log(`${BOLD}Weights:${R}`);
-    console.log(`  claude-code : ${config.weights['claude-code']}`);
-    console.log(`  codex       : ${config.weights['codex']}`);
-    console.log(`  agy-gemini  : ${config.weights['agy-gemini']}`);
-    console.log(`  agy-other   : ${config.weights['agy-other']}`);
+    console.log(`${BOLD}Configured Accounts:${R}`);
+    for (const acc of config.accounts) {
+      const envStr = acc.env ? ` (env: ${JSON.stringify(acc.env)})` : '';
+      const cmdStr = acc.command ? ` [cmd: ${acc.command}]` : '';
+      console.log(`  ${BOLD}${acc.id.padEnd(16)}${R} | Type: ${acc.type.padEnd(7)} | Weight: ${String(acc.weight).padEnd(4)} | Name: "${acc.displayName}"${cmdStr}${envStr}`);
+    }
     console.log();
     console.log(`${BOLD}Settings:${R}`);
     console.log(`  show-total  : ${config.showTotal}`);
     console.log();
     console.log(`${BOLD}Examples:${R}`);
-    console.log(`  agent-fuel config set claude-code 50`);
+    console.log(`  agent-fuel config add-account claude-personal --type claude --name "Claude Personal" --env CLAUDE_CONFIG_DIR=~/.claude-personal`);
+    console.log(`  agent-fuel config add-account codex-work --type codex --name "Codex Work" --cmd codex-work`);
+    console.log(`  agent-fuel config remove-account claude-personal`);
+    console.log(`  agent-fuel config set claude-code weight 50`);
     console.log(`  agent-fuel config set show-total false`);
     console.log();
     return true;
   }
 
-  if (subCommand === 'set') {
-    const key = args[2]?.toLowerCase();
-    const rawVal = args[3];
-
-    if (!key || !rawVal) {
-      console.error(`\n${BOLD}${RED}Error:${R} Usage: agent-fuel config set <key> <value>`);
-      console.error(`Keys: claude, claude-code, codex, gemini, agy-gemini, other, agy-other, show-total\n`);
+  if (subCommand === 'add-account') {
+    const id = args[2];
+    if (!id || id.startsWith('-')) {
+      console.error(`\n${BOLD}${RED}Error:${R} Usage: agent-fuel config add-account <id> --type <claude|codex|agy> [--name "Name"] [--cmd "command"] [--env KEY=VAL] [--weight N]\n`);
       process.exit(1);
     }
 
-    if (key === 'show-total') {
-      const lowerVal = rawVal.toLowerCase();
-      if (lowerVal !== 'true' && lowerVal !== 'false') {
+    let type: ToolType = 'claude';
+    let displayName = id;
+    let command: string | undefined = undefined;
+    let weight = 20;
+    const env: Record<string, string> = {};
+
+    for (let i = 3; i < args.length; i++) {
+      const arg = args[i];
+      if (arg === '--type' && args[i + 1]) {
+        const t = args[i + 1].toLowerCase();
+        if (['claude', 'codex', 'agy'].includes(t)) {
+          type = t as ToolType;
+        } else {
+          console.error(`\n${BOLD}${RED}Error:${R} Invalid type "${t}". Must be claude, codex, or agy.\n`);
+          process.exit(1);
+        }
+        i++;
+      } else if (arg === '--name' && args[i + 1]) {
+        displayName = args[i + 1];
+        i++;
+      } else if (arg === '--cmd' && args[i + 1]) {
+        command = args[i + 1];
+        i++;
+      } else if (arg === '--weight' && args[i + 1]) {
+        const w = Number(args[i + 1]);
+        if (Number.isFinite(w) && w >= 0) weight = w;
+        i++;
+      } else if (arg === '--env' && args[i + 1]) {
+        const parts = args[i + 1].split('=');
+        if (parts.length >= 2) {
+          env[parts[0]] = parts.slice(1).join('=');
+        }
+        i++;
+      }
+    }
+
+    const existingIdx = config.accounts.findIndex(a => a.id === id);
+    const newAcc: AccountConfig = {
+      id,
+      displayName,
+      type,
+      command: command || undefined,
+      env: Object.keys(env).length > 0 ? env : undefined,
+      weight,
+    };
+
+    if (existingIdx >= 0) {
+      config.accounts[existingIdx] = newAcc;
+      console.log(`\n${BOLD}${GREEN}✓${R} Updated account "${id}"\n`);
+    } else {
+      config.accounts.push(newAcc);
+      console.log(`\n${BOLD}${GREEN}✓${R} Added account "${id}" (${displayName})\n`);
+    }
+
+    saveConfig(config);
+    return true;
+  }
+
+  if (subCommand === 'remove-account') {
+    const id = args[2];
+    if (!id) {
+      console.error(`\n${BOLD}${RED}Error:${R} Usage: agent-fuel config remove-account <id>\n`);
+      process.exit(1);
+    }
+
+    const initialLength = config.accounts.length;
+    config.accounts = config.accounts.filter(a => a.id !== id);
+
+    if (config.accounts.length === initialLength) {
+      console.error(`\n${BOLD}${RED}Error:${R} Account "${id}" not found.\n`);
+      process.exit(1);
+    }
+
+    saveConfig(config);
+    console.log(`\n${BOLD}${GREEN}✓${R} Removed account "${id}"\n`);
+    return true;
+  }
+
+  if (subCommand === 'set') {
+    const keyOrId = args[2];
+    const propertyOrVal = args[3];
+    const rawVal = args[4];
+
+    if (!keyOrId) {
+      console.error(`\n${BOLD}${RED}Error:${R} Usage: agent-fuel config set <account-id|show-total> [weight|property] <value>\n`);
+      process.exit(1);
+    }
+
+    if (keyOrId.toLowerCase() === 'show-total') {
+      const val = propertyOrVal?.toLowerCase();
+      if (val !== 'true' && val !== 'false') {
         console.error(`\n${BOLD}${RED}Error:${R} show-total must be true or false\n`);
         process.exit(1);
       }
-      config.showTotal = lowerVal === 'true';
+      config.showTotal = val === 'true';
       saveConfig(config);
       console.log(`\n${BOLD}${GREEN}✓${R} Set show-total to ${config.showTotal}\n`);
       return true;
     }
 
-    // Handle weights keys
-    let targetKey: keyof Config['weights'] | null = null;
-    if (key === 'claude' || key === 'claude-code') {
-      targetKey = 'claude-code';
-    } else if (key === 'codex') {
-      targetKey = 'codex';
-    } else if (key === 'gemini' || key === 'agy-gemini') {
-      targetKey = 'agy-gemini';
-    } else if (key === 'other' || key === 'agy-other') {
-      targetKey = 'agy-other';
-    }
-
-    if (!targetKey) {
-      console.error(`\n${BOLD}${RED}Error:${R} Unknown key "${key}".`);
-      console.error(`Valid keys: claude, claude-code, codex, gemini, agy-gemini, other, agy-other, show-total\n`);
+    // Checking account update
+    const account = config.accounts.find(a => a.id.toLowerCase() === keyOrId.toLowerCase());
+    if (!account) {
+      console.error(`\n${BOLD}${RED}Error:${R} Unknown account or setting "${keyOrId}". Use agent-fuel config list to view accounts.\n`);
       process.exit(1);
     }
 
-    const val = Number(rawVal);
-    if (!Number.isFinite(val) || val < 0) {
-      console.error(`\n${BOLD}${RED}Error:${R} Weight must be a positive number or 0.\n`);
-      process.exit(1);
+    const prop = rawVal ? propertyOrVal.toLowerCase() : 'weight';
+    const valueStr = rawVal ?? propertyOrVal;
+
+    if (prop === 'weight') {
+      const val = Number(valueStr);
+      if (!Number.isFinite(val) || val < 0) {
+        console.error(`\n${BOLD}${RED}Error:${R} Weight must be a non-negative number.\n`);
+        process.exit(1);
+      }
+      account.weight = val;
+      saveConfig(config);
+      console.log(`\n${BOLD}${GREEN}✓${R} Set weight for account "${account.id}" to ${val}\n`);
+      return true;
     }
 
-    config.weights[targetKey] = val;
-    saveConfig(config);
-    console.log(`\n${BOLD}${GREEN}✓${R} Set weight.${targetKey} to ${val}\n`);
-    return true;
+    if (prop === 'name' || prop === 'displayname') {
+      account.displayName = valueStr;
+      saveConfig(config);
+      console.log(`\n${BOLD}${GREEN}✓${R} Set displayName for account "${account.id}" to "${valueStr}"\n`);
+      return true;
+    }
+
+    if (prop === 'command' || prop === 'cmd') {
+      account.command = valueStr;
+      saveConfig(config);
+      console.log(`\n${BOLD}${GREEN}✓${R} Set command for account "${account.id}" to "${valueStr}"\n`);
+      return true;
+    }
+
+    console.error(`\n${BOLD}${RED}Error:${R} Unknown property "${prop}". Supported properties: weight, name, command\n`);
+    process.exit(1);
   }
 
   console.error(`\n${BOLD}${RED}Error:${R} Unknown config sub-command "${subCommand}".`);
-  console.error(`Usage: agent-fuel config [list|set]\n`);
+  console.error(`Usage: agent-fuel config [list|add-account|remove-account|set]\n`);
   process.exit(1);
 }
+

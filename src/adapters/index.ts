@@ -1,5 +1,6 @@
 export interface UsageSnapshot {
-  tool: 'codex' | 'claude-code' | 'agy-gemini' | 'agy-other' | 'total';
+  tool: string;
+  displayName?: string;
   remainingPercent: number | null;
   usedPercent?: number | null;
   resetAt?: string | null;

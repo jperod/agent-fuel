@@ -10,6 +10,8 @@ import { debug } from '../debug.js';
 
 const execAsync = promisify(exec);
 
+import { AccountConfig } from '../config.js';
+
 // Used ONLY as a rough fallback estimate when the TUI scrape cannot determine
 // a percentage. This is a GUESS based on local session cost data — not an
 // official Codex quota signal. Override with AGENT_FUEL_CODEX_BUDGET env var.
@@ -33,15 +35,10 @@ const CODEX_STATUS_READY_MS     =  4_000; // second /status carries the live quo
 /**
  * Launches `codex` in a tmux session, pipes all terminal bytes to a temp
  * file, sends /status twice, then reads the file and returns the raw bytes.
- *
- * Why pipe-pane instead of capture-pane:
- * The /status overlay is full-screen and transient — it renders in-place for
- * one frame and re-renders away without entering the tmux scrollback buffer.
- * capture-pane (even with -S history) can never catch it. pipe-pane streams
- * every raw byte to a file so even a 10ms overlay is permanently recorded.
  */
-async function runCodexScrape(): Promise<string> {
-  const tui = new TuiScraper('env CODEX_NON_INTERACTIVE=1 codex');
+async function runCodexScrape(cmd = 'codex', env?: Record<string, string>): Promise<string> {
+  const fullCmd = `CODEX_NON_INTERACTIVE=1 ${cmd}`;
+  const tui = new TuiScraper(fullCmd, env);
   
   const tmpDir = os.tmpdir();
   const randomSuffix = crypto.randomBytes(6).toString('hex');
@@ -54,11 +51,6 @@ async function runCodexScrape(): Promise<string> {
     tui.start();
 
     // Stream all pane output to a file from the start.
-    // Single-quote escaping: safe against all shell metacharacters ($, `, \, space, etc.)
-    // Note: pipe-pane executes this command via tmux's `default-shell` (defaults to /bin/sh).
-    // If the user has set default-shell to a non-POSIX shell (e.g. fish), the `'\\''` idiom
-    // will fail — but pipePath is constructed from os.tmpdir() + hex, so single quotes
-    // cannot appear in practice, making the replace a no-op and the quoting sh-compatible.
     const shellSafePath = "'" + pipePath.replace(/'/g, "'\\''") + "'";
     execFileSync('tmux', ['pipe-pane', '-t', tui.sessionId, `cat >> ${shellSafePath}`]);
     debug('codex:scrape', `pipe-pane logging to ${pipePath}`);
@@ -199,9 +191,10 @@ function parseScrapeOutput(raw: string): CodexScrapeResult {
 
 // ── ccusage fallback estimate ──────────────────────────────────────────────
 
-async function fetchCcusageEstimate(budgetLimit: number): Promise<UsageSnapshot> {
+async function fetchCcusageEstimate(budgetLimit: number, toolId = 'codex', displayName = 'Codex'): Promise<UsageSnapshot> {
   const unknown = (): UsageSnapshot => ({
-    tool: 'codex',
+    tool: toolId,
+    displayName,
     remainingPercent: null,
     usedPercent: null,
     resetAt: null,
@@ -225,7 +218,7 @@ async function fetchCcusageEstimate(budgetLimit: number): Promise<UsageSnapshot>
       Array.isArray(data)           ? data           : [];
 
     if (sessions.length === 0) {
-      return { tool: 'codex', remainingPercent: 100, usedPercent: 0, resetAt: null, source: 'ccusage' };
+      return { tool: toolId, displayName, remainingPercent: 100, usedPercent: 0, resetAt: null, source: 'ccusage' };
     }
 
     const todayStr = localDateString(new Date());
@@ -236,7 +229,7 @@ async function fetchCcusageEstimate(budgetLimit: number): Promise<UsageSnapshot>
     });
 
     if (todaySessions.length === 0) {
-      return { tool: 'codex', remainingPercent: 100, usedPercent: 0, resetAt: null, source: 'ccusage' };
+      return { tool: toolId, displayName, remainingPercent: 100, usedPercent: 0, resetAt: null, source: 'ccusage' };
     }
 
     const totalCost = todaySessions.reduce(
@@ -271,7 +264,8 @@ async function fetchCcusageEstimate(budgetLimit: number): Promise<UsageSnapshot>
       resetAt,
     });
     return {
-      tool: 'codex',
+      tool: toolId,
+      displayName,
       remainingPercent,
       usedPercent: Math.round(usedPct),
       resetAt,
@@ -289,7 +283,7 @@ async function fetchCcusageEstimate(budgetLimit: number): Promise<UsageSnapshot>
 export class CodexQuotaAdapter implements QuotaAdapter {
   private readonly budgetLimit: number;
 
-  constructor() {
+  constructor(private readonly account?: AccountConfig) {
     const override = Number(process.env.AGENT_FUEL_CODEX_BUDGET);
     this.budgetLimit = Number.isFinite(override) && override > 0 ? override : DEFAULT_BUDGET_USD;
   }
@@ -299,16 +293,22 @@ export class CodexQuotaAdapter implements QuotaAdapter {
   }
 
   private async _fetch(): Promise<UsageSnapshot> {
-    debug('codex:fetch', 'starting TUI scrape via tmux');
+    const toolId = this.account?.id || 'codex';
+    const displayName = this.account?.displayName || 'Codex';
+    const cmd = this.account?.command || 'codex';
+    const env = this.account?.env;
+
+    debug('codex:fetch', `starting TUI scrape for account ${toolId} (${cmd})`);
     try {
-      const raw = await runCodexScrape();
+      const raw = await runCodexScrape(cmd, env);
       const result = parseScrapeOutput(raw);
 
       if (result.quotaReached) {
         const resetAt = result.resetIn ? `Resets in ${result.resetIn}` : null;
         debug('codex:fetch', 'quota reached → returning 0%');
         return {
-          tool: 'codex',
+          tool: toolId,
+          displayName,
           remainingPercent: 0,
           usedPercent: 100,
           resetAt,
@@ -334,7 +334,8 @@ export class CodexQuotaAdapter implements QuotaAdapter {
 
         debug('codex:fetch', `parsed /status → ${remainingPercent}% remaining (limiting factor: ${limiting.type})`);
         return {
-          tool: 'codex',
+          tool: toolId,
+          displayName,
           remainingPercent,
           usedPercent: 100 - remainingPercent,
           resetAt,
@@ -349,11 +350,11 @@ export class CodexQuotaAdapter implements QuotaAdapter {
       }
 
       debug('codex:fetch', '/status parse failed → falling back to ccusage estimate');
-      return fetchCcusageEstimate(this.budgetLimit);
+      return fetchCcusageEstimate(this.budgetLimit, toolId, displayName);
 
     } catch (err) {
       debug('codex:fetch', 'caught error, falling back to ccusage', String(err));
-      return fetchCcusageEstimate(this.budgetLimit);
+      return fetchCcusageEstimate(this.budgetLimit, toolId, displayName);
     }
   }
 }

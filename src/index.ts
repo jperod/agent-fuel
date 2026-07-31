@@ -4,17 +4,13 @@ import { debugEnabled, debugLogFile } from './debug.js';
 import { ClaudeQuotaAdapter } from './adapters/claude.js';
 import { CodexQuotaAdapter } from './adapters/codex.js';
 import { AgyQuotaAdapter } from './adapters/agy.js';
-import { UsageSnapshot } from './adapters/index.js';
+import { QuotaAdapter, UsageSnapshot } from './adapters/index.js';
 import { printHeader, printFooter, formatRow, getDisplayName, SHADE_CHAR } from './render.js';
-import { loadConfig, handleConfigCommand } from './config.js';
+import { loadConfig, handleConfigCommand, AccountConfig } from './config.js';
 import { checkUpdateBackground, promptAndUpgrade, runUpdateCheckNow } from './update.js';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import fs from 'node:fs';
-
-// Fixed display order — never changes regardless of which adapter resolves first
-const SLOT_ORDER = ['claude-code', 'codex', 'agy-gemini', 'agy-other'] as const;
-type SlotTool = typeof SLOT_ORDER[number];
 
 const BOLD  = '\x1b[1m';
 const DIM   = '\x1b[2m';
@@ -28,25 +24,69 @@ let spinnerTick = 0;
 
 const config = loadConfig();
 
-function spinnerLine(tool: SlotTool): string {
-  const frame = SPINNER[spinnerTick % SPINNER.length];
-  return `${BOLD}${getDisplayName(tool).padEnd(13)}${R} ${GRAY}${frame} loading...${R}\x1b[K`;
+// Build dynamic slot order & weight mapping
+function buildSlotInfo(accounts: AccountConfig[]) {
+  const typePriority: Record<string, number> = { claude: 1, codex: 2, agy: 3 };
+  const sortedAccounts = [...accounts].sort((a, b) => {
+    const pA = typePriority[a.type] ?? 99;
+    const pB = typePriority[b.type] ?? 99;
+    return pA - pB;
+  });
+
+  const slotOrder: string[] = [];
+  const slotWeights = new Map<string, number>();
+  const slotDisplayNames = new Map<string, string>();
+
+  for (const acc of sortedAccounts) {
+    if (acc.type === 'agy') {
+      const geminiId = `${acc.id}-gemini`;
+      const otherId = `${acc.id}-other`;
+
+      const geminiName = acc.displayName.includes('Gemini') ? acc.displayName : `${acc.displayName} Gemini`;
+      const otherName = acc.displayName.includes('Other') ? acc.displayName : `${acc.displayName} Other`;
+
+      slotOrder.push(geminiId, otherId);
+      slotWeights.set(geminiId, acc.weight / 2);
+      slotWeights.set(otherId, acc.weight / 2);
+      slotDisplayNames.set(geminiId, geminiName);
+      slotDisplayNames.set(otherId, otherName);
+    } else {
+      slotOrder.push(acc.id);
+      slotWeights.set(acc.id, acc.weight);
+      slotDisplayNames.set(acc.id, acc.displayName);
+    }
+  }
+
+  let maxLabelWidth = 13;
+  for (const name of slotDisplayNames.values()) {
+    if (name.length > maxLabelWidth) maxLabelWidth = name.length;
+  }
+
+  return { slotOrder, slotWeights, slotDisplayNames, maxLabelWidth };
 }
 
-function calculateTotalLine(snapshots: Map<SlotTool, UsageSnapshot | null>): string {
+const { slotOrder: SLOT_ORDER, slotWeights, slotDisplayNames, maxLabelWidth } = buildSlotInfo(config.accounts);
+
+function spinnerLine(toolId: string): string {
+  const frame = SPINNER[spinnerTick % SPINNER.length];
+  const name = slotDisplayNames.get(toolId) || getDisplayName(toolId);
+  return `${BOLD}${name.padEnd(maxLabelWidth)}${R} ${GRAY}${frame} loading...${R}\x1b[K`;
+}
+
+function calculateTotalLine(snapshots: Map<string, UsageSnapshot | null>): string {
   let totalWeight = 0;
   let totalRemainingWeight = 0;
   let hasActive = false;
   let isAnyLoading = false;
   
-  for (const tool of SLOT_ORDER) {
-    const snap = snapshots.get(tool);
+  for (const toolId of SLOT_ORDER) {
+    const snap = snapshots.get(toolId);
     if (snap === undefined || snap === null) {
       isAnyLoading = true;
       continue;
     }
     if (snap.remainingPercent !== null) {
-      const w = config.weights[tool] ?? 0;
+      const w = slotWeights.get(toolId) ?? 0;
       totalWeight += w;
       totalRemainingWeight += (snap.remainingPercent / 100) * w;
       hasActive = true;
@@ -56,17 +96,18 @@ function calculateTotalLine(snapshots: Map<SlotTool, UsageSnapshot | null>): str
   if (!hasActive) {
     if (isAnyLoading) {
       const frame = SPINNER[spinnerTick % SPINNER.length];
-      return `${BOLD}${CYAN}Total${R}         [${GRAY}${SHADE_CHAR.repeat(30)}${R}] ${GRAY}${frame} loading...${R}\x1b[K`;
+      return `${BOLD}${CYAN}Total${R}${' '.repeat(Math.max(1, maxLabelWidth - 5))} [${GRAY}${SHADE_CHAR.repeat(30)}${R}] ${GRAY}${frame} loading...${R}\x1b[K`;
     }
     
     const totalSnap: UsageSnapshot = {
       tool: 'total',
+      displayName: 'Total',
       remainingPercent: null,
       usedPercent: null,
       source: 'unknown',
       isLoading: true
     };
-    return formatRow(totalSnap);
+    return formatRow(totalSnap, maxLabelWidth);
   }
   
   const pct = totalWeight > 0 
@@ -75,13 +116,14 @@ function calculateTotalLine(snapshots: Map<SlotTool, UsageSnapshot | null>): str
     
   const totalSnap: UsageSnapshot = {
     tool: 'total',
+    displayName: 'Total',
     remainingPercent: pct,
     usedPercent: pct !== null ? 100 - pct : null,
     source: 'local-state',
     isLoading: isAnyLoading
   };
   
-  let formatted = formatRow(totalSnap);
+  let formatted = formatRow(totalSnap, maxLabelWidth);
   
   if (isAnyLoading) {
     const frame = SPINNER[spinnerTick % SPINNER.length];
@@ -96,16 +138,16 @@ function calculateTotalLine(snapshots: Map<SlotTool, UsageSnapshot | null>): str
 // In TTY mode: restore cursor to saved position and repaint all slots.
 // In pipe mode: emit each newly-resolved line exactly once (tracked via emitted set).
 function redraw(
-  slots: Map<SlotTool, string | null>,
-  emitted: Set<SlotTool | 'total'>,
-  snapshots: Map<SlotTool, UsageSnapshot | null>
+  slots: Map<string, string | null>,
+  emitted: Set<string | 'total'>,
+  snapshots: Map<string, UsageSnapshot | null>
 ): void {
   if (!isTTY) {
-    for (const tool of SLOT_ORDER) {
-      const line = slots.get(tool);
-      if (line != null && !emitted.has(tool)) {
+    for (const toolId of SLOT_ORDER) {
+      const line = slots.get(toolId);
+      if (line != null && !emitted.has(toolId)) {
         process.stdout.write(line + '\n');
-        emitted.add(tool);
+        emitted.add(toolId);
       }
     }
     
@@ -126,10 +168,10 @@ function redraw(
     process.stdout.write('\x1b[2K\r\n'); // spacer line
   }
   
-  for (const tool of SLOT_ORDER) {
+  for (const toolId of SLOT_ORDER) {
     process.stdout.write('\x1b[2K\r');
-    const line = slots.get(tool);
-    process.stdout.write((line != null ? line + '\x1b[K' : spinnerLine(tool)) + '\n');
+    const line = slots.get(toolId);
+    process.stdout.write((line != null ? line + '\x1b[K' : spinnerLine(toolId)) + '\n');
   }
 }
 
@@ -139,7 +181,7 @@ function loadPackageVersion(): string {
     const pkg = JSON.parse(fs.readFileSync(path.join(dir, '../package.json'), 'utf8'));
     return pkg.version;
   } catch {
-    return '0.6.0';
+    return '0.8.0';
   }
 }
 
@@ -158,17 +200,22 @@ async function main(): Promise<void> {
 
   const updateVersion = checkUpdateBackground(currentVersion);
 
-  const claudeAdapter = new ClaudeQuotaAdapter();
-  const codexAdapter  = new CodexQuotaAdapter();
-  const agyAdapter    = new AgyQuotaAdapter();
+  const adapters: QuotaAdapter[] = config.accounts.map(acc => {
+    switch (acc.type) {
+      case 'claude': return new ClaudeQuotaAdapter(acc);
+      case 'codex':  return new CodexQuotaAdapter(acc);
+      case 'agy':    return new AgyQuotaAdapter(acc);
+      default:       return new ClaudeQuotaAdapter(acc);
+    }
+  });
 
   if (debugEnabled) process.stderr.write(`\x1b[2m[debug] logging to ${debugLogFile}\x1b[0m\n`);
   printHeader();
 
   // Save cursor before the placeholder rows so redraw() can teleport back and overwrite them
-  const slots     = new Map<SlotTool, string | null>(SLOT_ORDER.map(t => [t, null]));
-  const snapshots = new Map<SlotTool, UsageSnapshot | null>(SLOT_ORDER.map(t => [t, null]));
-  const emitted   = new Set<SlotTool | 'total'>(); // pipe-mode: tracks which lines have been printed
+  const slots     = new Map<string, string | null>(SLOT_ORDER.map(t => [t, null]));
+  const snapshots = new Map<string, UsageSnapshot | null>(SLOT_ORDER.map(t => [t, null]));
+  const emitted   = new Set<string | 'total'>(); // pipe-mode: tracks which lines have been printed
   
   if (isTTY) {
     process.stdout.write('\x1b7'); // DEC save-cursor
@@ -178,8 +225,8 @@ async function main(): Promise<void> {
     }
   }
   
-  for (const tool of SLOT_ORDER) {
-    process.stdout.write(spinnerLine(tool) + '\n');
+  for (const toolId of SLOT_ORDER) {
+    process.stdout.write(spinnerLine(toolId) + '\n');
   }
 
   // Animate spinner at 80ms while any slot is still loading
@@ -190,19 +237,15 @@ async function main(): Promise<void> {
   // Each adapter fills its slot(s) and triggers a redraw; order is always fixed
   function fill(snaps: UsageSnapshot[]): void {
     for (const snap of snaps) {
-      if (SLOT_ORDER.includes(snap.tool as SlotTool)) {
-        snapshots.set(snap.tool as SlotTool, snap);
-        slots.set(snap.tool as SlotTool, formatRow(snap));
+      if (SLOT_ORDER.includes(snap.tool)) {
+        snapshots.set(snap.tool, snap);
+        slots.set(snap.tool, formatRow(snap, maxLabelWidth));
       }
     }
     redraw(slots, emitted, snapshots);
   }
 
-  await Promise.allSettled([
-    claudeAdapter.fetchSnapshots().then(fill),
-    codexAdapter.fetchSnapshots().then(fill),
-    agyAdapter.fetchSnapshots().then(fill),
-  ]);
+  await Promise.allSettled(adapters.map(adapter => adapter.fetchSnapshots().then(fill)));
 
   if (spinnerTimer) clearInterval(spinnerTimer);
   redraw(slots, emitted, snapshots); // final clean repaint with all data
@@ -217,3 +260,4 @@ main().catch((error) => {
   console.error('\x1b[31mFatal error orchestrating Agent Fuel CLI:\x1b[0m', error);
   process.exit(1);
 });
+

@@ -2,6 +2,8 @@ import { QuotaAdapter, UsageSnapshot } from './index.js';
 import { TuiScraper, sleep } from '../tmux.js';
 import { debug } from '../debug.js';
 
+import { AccountConfig } from '../config.js';
+
 // ── TUI scraper ────────────────────────────────────────────────────────────
 
 /**
@@ -12,21 +14,22 @@ import { debug } from '../debug.js';
  * The Status tab renders persistently (not transient), so regular
  * capture-pane is sufficient — no pipe-pane needed.
  */
-async function runClaudeScrape(): Promise<string> {
-  const tui = new TuiScraper('env DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 claude');
+async function runClaudeScrape(cmd = 'claude', env?: Record<string, string>): Promise<string> {
+  const fullCmd = `DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 ${cmd}`;
+  const tui = new TuiScraper(fullCmd, env);
   try {
     tui.start();
 
-    const CLAUDE_READY  = /Welcome back|Try "|❯/i;
-    const CLAUDE_DIALOG = /trust this folder|Update available|terms of service|telemetry|analytics/i;
-    const CLAUDE_EITHER = new RegExp(`(?:${CLAUDE_READY.source})|(?:${CLAUDE_DIALOG.source})`, 'i');
+    const CLAUDE_READY  = /Welcome back|Try "/i;
+    const CLAUDE_DIALOG = /trust this folder|Update available|terms of service|telemetry|analytics|Chrome extension|use my browser|browser tools/i;
+    const CLAUDE_EITHER = new RegExp(`(?:${CLAUDE_READY.source})|(?:${CLAUDE_DIALOG.source})|❯`, 'i');
     const CLAUDE_STARTUP_MS = 25_000;
     const CLAUDE_DIALOG_SETTLE_MS = 1_000;
 
     const dialogDeadline = Date.now() + CLAUDE_STARTUP_MS;
     let screen = await tui.waitFor(CLAUDE_EITHER, CLAUDE_STARTUP_MS, 0);
 
-    while (!CLAUDE_READY.test(screen)) {
+    while (Date.now() < dialogDeadline) {
       if (/Update available/i.test(screen)) {
         debug('claude:scrape', 'Update available prompt detected, sending Down + Enter to skip...');
         tui.sendKey('Down');
@@ -35,9 +38,15 @@ async function runClaudeScrape(): Promise<string> {
       } else if (/trust this folder/i.test(screen)) {
         debug('claude:scrape', 'trust folder prompt detected, confirming trust...');
         tui.sendKey('Enter');
+      } else if (/Chrome extension|use my browser|browser tools/i.test(screen)) {
+        debug('claude:scrape', 'Chrome extension prompt detected, sending Enter...');
+        tui.sendKey('Enter');
       } else if (/terms of service|telemetry|analytics/i.test(screen)) {
         debug('claude:scrape', 'onboarding prompt detected, sending Enter...');
         tui.sendKey('Enter');
+      } else if (CLAUDE_READY.test(screen) || (screen.includes('❯') && !CLAUDE_DIALOG.test(screen))) {
+        debug('claude:scrape', 'Claude prompt is ready');
+        break;
       }
       await sleep(CLAUDE_DIALOG_SETTLE_MS);
       const remaining = dialogDeadline - Date.now();
@@ -171,28 +180,37 @@ function parseScrapeOutput(screen: string): ClaudeScrapeResult {
 // ── Adapter ────────────────────────────────────────────────────────────────
 
 export class ClaudeQuotaAdapter implements QuotaAdapter {
+  constructor(private readonly account?: AccountConfig) {}
+
   public async fetchSnapshots(): Promise<UsageSnapshot[]> {
     return [await this._fetch()];
   }
 
   private async _fetch(): Promise<UsageSnapshot> {
+    const toolId = this.account?.id || 'claude-code';
+    const displayName = this.account?.displayName || 'Claude Code';
+    const cmd = this.account?.command || 'claude';
+    const env = this.account?.env;
+
     const unknown = (): UsageSnapshot => ({
-      tool: 'claude-code',
+      tool: toolId,
+      displayName,
       remainingPercent: null,
       usedPercent: null,
       resetAt: null,
       source: 'unknown',
     });
 
-    debug('claude:fetch', 'starting TUI scrape via tmux');
+    debug('claude:fetch', `starting TUI scrape for account ${toolId} (${cmd})`);
     try {
-      const screen = await runClaudeScrape();
+      const screen = await runClaudeScrape(cmd, env);
       const result = parseScrapeOutput(screen);
 
       if (result.isNotLoggedIn) {
         debug('claude:fetch', 'detected not logged in');
         return {
-          tool: 'claude-code',
+          tool: toolId,
+          displayName,
           remainingPercent: null,
           usedPercent: null,
           resetAt: 'not logged in',
@@ -203,7 +221,8 @@ export class ClaudeQuotaAdapter implements QuotaAdapter {
       if (result.isApiBilling) {
         debug('claude:fetch', 'detected API Usage Billing');
         return {
-          tool: 'claude-code',
+          tool: toolId,
+          displayName,
           remainingPercent: 100,
           usedPercent: 0,
           resetAt: 'billing active',
@@ -232,7 +251,8 @@ export class ClaudeQuotaAdapter implements QuotaAdapter {
         const weeklyLimitReached = weeklyRemaining === 0;
 
         return {
-          tool: 'claude-code',
+          tool: toolId,
+          displayName,
           remainingPercent,
           usedPercent,
           resetAt,

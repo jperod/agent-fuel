@@ -5,6 +5,8 @@ import { QuotaAdapter, UsageSnapshot } from './index.js';
 import { TuiScraper, sleep } from '../tmux.js';
 import { debug } from '../debug.js';
 
+import { AccountConfig } from '../config.js';
+
 const CACHE_PATH = path.join(os.homedir(), '.gemini/antigravity-cli/.agent-fuel-quota-cache.json');
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -25,14 +27,12 @@ interface QuotaCache {
  * Launches `agy` in a tmux session, opens the `/usage` panel, waits for
  * the Model Quota list to render, then returns clean rendered screen text.
  */
-async function runAgyUsage(): Promise<string> {
-  const tui = new TuiScraper('agy');
+async function runAgyUsage(cmd = 'agy', env?: Record<string, string>): Promise<string> {
+  const tui = new TuiScraper(cmd, env);
   try {
     tui.start();
 
     // Wait for AGY main menu ready.
-    // On first run in a new directory, AGY shows a "Do you trust this project?"
-    // prompt. The "Yes, I trust this folder" option is pre-selected; press Enter.
     const firstScreen = await tui.waitFor(/for shortcuts|Do you trust/i, 20_000);
     if (!/for shortcuts/i.test(firstScreen)) {
       debug('agy:scrape', 'trust prompt detected — confirming with Enter');
@@ -56,23 +56,7 @@ async function runAgyUsage(): Promise<string> {
 
 // ── Parsing ────────────────────────────────────────────────────────────────
 
-/**
- * Parse the Model Quota panel into an array of entries.
- *
- * Panel format (tmux rendered — no ANSI codes):
- *
- *   └ Model Quota
- *
- *     Gemini 3.5 Flash (High)
- *     ░░░░░░░░░░░ ... 20%
- *     Refreshes in 3h 28m
- *
- *     Claude Sonnet 4.6 (Thinking)
- *     ███████████ ... 100%
- *     Quota available
- */
 function parseQuotaPanel(raw: string): ModelQuotaEntry[] {
-  // tmux capture-pane returns clean rendered text — no ANSI stripping needed
   const lines = raw.split(/\r?\n/);
   const results: ModelQuotaEntry[] = [];
 
@@ -155,29 +139,43 @@ function parseQuotaPanel(raw: string): ModelQuotaEntry[] {
 
 // ── Cache helpers ──────────────────────────────────────────────────────────
 
-async function readCache(): Promise<QuotaCache | null> {
+async function readCache(accountKey = 'default'): Promise<QuotaCache | null> {
+  const cacheFile = CACHE_PATH.replace('.json', `-${accountKey}.json`);
   try {
-    return JSON.parse(await fs.readFile(CACHE_PATH, 'utf-8')) as QuotaCache;
+    return JSON.parse(await fs.readFile(cacheFile, 'utf-8')) as QuotaCache;
   } catch { return null; }
 }
 
-async function writeCache(entries: ModelQuotaEntry[]): Promise<void> {
+async function writeCache(entries: ModelQuotaEntry[], accountKey = 'default'): Promise<void> {
+  const cacheFile = CACHE_PATH.replace('.json', `-${accountKey}.json`);
   try {
-    await fs.writeFile(CACHE_PATH, JSON.stringify({ fetchedAt: Date.now(), entries }), 'utf-8');
+    await fs.writeFile(cacheFile, JSON.stringify({ fetchedAt: Date.now(), entries }), 'utf-8');
   } catch { /* non-fatal */ }
 }
 
 // ── Bucket aggregation ────────────────────────────────────────────────────
 
-function buildSnapshots(entries: ModelQuotaEntry[], fromCache: boolean): UsageSnapshot[] {
+function buildSnapshots(
+  entries: ModelQuotaEntry[],
+  fromCache: boolean,
+  account?: AccountConfig,
+): UsageSnapshot[] {
   const source = fromCache ? 'cache' : 'official-cli';
+  const baseId = account?.id || 'agy';
+  const baseName = account?.displayName || 'AGY';
+
+  const geminiToolId = `${baseId}-gemini`;
+  const otherToolId = `${baseId}-other`;
+
+  const geminiName = baseName.includes('Gemini') ? baseName : `${baseName} Gemini`;
+  const otherName = baseName.includes('Other') ? baseName : `${baseName} Other`;
 
   const geminiEntries = entries.filter(e => /gemini/i.test(e.model));
   const otherEntries  = entries.filter(e => !/gemini/i.test(e.model));
 
-  function worstCase(bucket: ModelQuotaEntry[], tool: UsageSnapshot['tool']): UsageSnapshot {
+  function worstCase(bucket: ModelQuotaEntry[], tool: string, displayName: string): UsageSnapshot {
     if (bucket.length === 0) {
-      return { tool, remainingPercent: null, usedPercent: null, resetAt: null, source: 'unknown' };
+      return { tool, displayName, remainingPercent: null, usedPercent: null, resetAt: null, source: 'unknown' };
     }
 
     const weeklyLimit = bucket.find(e => /weekly/i.test(e.model));
@@ -205,6 +203,7 @@ function buildSnapshots(entries: ModelQuotaEntry[], fromCache: boolean): UsageSn
 
     return {
       tool,
+      displayName,
       remainingPercent,
       usedPercent: 100 - remainingPercent,
       resetAt,
@@ -220,42 +219,53 @@ function buildSnapshots(entries: ModelQuotaEntry[], fromCache: boolean): UsageSn
   }
 
   return [
-    worstCase(geminiEntries, 'agy-gemini'),
-    worstCase(otherEntries,  'agy-other'),
+    worstCase(geminiEntries, geminiToolId, geminiName),
+    worstCase(otherEntries,  otherToolId, otherName),
   ];
 }
 
 // ── Adapter ───────────────────────────────────────────────────────────────
 
 export class AgyQuotaAdapter implements QuotaAdapter {
+  constructor(private readonly account?: AccountConfig) {}
+
   public async fetchSnapshots(): Promise<UsageSnapshot[]> {
+    const accountKey = this.account?.id || 'default';
+    const cmd = this.account?.command || 'agy';
+    const env = this.account?.env;
+
     // Fast path: serve from cache if fresh enough
-    const cached = await readCache();
+    const cached = await readCache(accountKey);
     if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
-      return buildSnapshots(cached.entries, true);
+      return buildSnapshots(cached.entries, true, this.account);
     }
 
     // Slow path: spawn agy via tmux, scrape the quota panel
     try {
-      const raw = await runAgyUsage();
+      const raw = await runAgyUsage(cmd, env);
       const entries = parseQuotaPanel(raw);
 
       if (entries.length > 0) {
-        await writeCache(entries);
-        return buildSnapshots(entries, false);
+        await writeCache(entries, accountKey);
+        return buildSnapshots(entries, false, this.account);
       }
 
+      const baseId = this.account?.id || 'agy';
+      const baseName = this.account?.displayName || 'AGY';
       return [
-        { tool: 'agy-gemini', remainingPercent: null, usedPercent: null, resetAt: null, source: 'unknown' },
-        { tool: 'agy-other',  remainingPercent: null, usedPercent: null, resetAt: null, source: 'unknown' },
+        { tool: `${baseId}-gemini`, displayName: `${baseName} Gemini`, remainingPercent: null, usedPercent: null, resetAt: null, source: 'unknown' },
+        { tool: `${baseId}-other`,  displayName: `${baseName} Other`, remainingPercent: null, usedPercent: null, resetAt: null, source: 'unknown' },
       ];
 
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
+      const baseId = this.account?.id || 'agy';
+      const baseName = this.account?.displayName || 'AGY';
       return [
-        { tool: 'agy-gemini', remainingPercent: null, usedPercent: null, resetAt: null, source: 'unknown', raw: msg },
-        { tool: 'agy-other',  remainingPercent: null, usedPercent: null, resetAt: null, source: 'unknown', raw: msg },
+        { tool: `${baseId}-gemini`, displayName: `${baseName} Gemini`, remainingPercent: null, usedPercent: null, resetAt: null, source: 'unknown', raw: msg },
+        { tool: `${baseId}-other`,  displayName: `${baseName} Other`, remainingPercent: null, usedPercent: null, resetAt: null, source: 'unknown', raw: msg },
       ];
     }
   }
 }
+

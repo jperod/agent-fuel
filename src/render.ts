@@ -22,14 +22,18 @@ const GRAY  = '\x1b[90m';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-export function getDisplayName(tool: string): string {
-  switch (tool) {
+export function getDisplayName(input: string | UsageSnapshot): string {
+  if (typeof input === 'object' && input !== null) {
+    if (input.displayName) return input.displayName;
+    input = input.tool;
+  }
+  switch (input) {
     case 'codex':       return 'Codex';
     case 'claude-code': return 'Claude Code';
     case 'agy-gemini':  return 'AGY Gemini';
     case 'agy-other':   return 'AGY Other';
     case 'total':       return 'Total';
-    default:            return tool;
+    default:            return input;
   }
 }
 
@@ -77,8 +81,8 @@ function isEstimate(snap: UsageSnapshot): boolean {
 
 // ── Core format (returns string, no newline) ───────────────────────────────
 
-export function formatRow(snap: UsageSnapshot): string {
-  const displayName = getDisplayName(snap.tool);
+export function formatRow(snap: UsageSnapshot, padWidth = 13): string {
+  const displayName = getDisplayName(snap);
   const remaining   = snap.remainingPercent;
 
   let barStr: string;
@@ -100,17 +104,16 @@ export function formatRow(snap: UsageSnapshot): string {
   if (snap.breakdown) {
     parts.push(`${GRAY}(5h: ${snap.breakdown.fiveHour}% | wk: ${snap.breakdown.weekly}%)${R}`);
   } else {
-    if (snap.limitType === 'weekly' && snap.tool !== 'agy-gemini' && snap.tool !== 'agy-other') {
+    if (snap.limitType === 'weekly' && !snap.tool.includes('agy')) {
       parts.push(`${GRAY}[weekly]${R}`);
-    } else if (snap.limitType === 'session' && snap.tool !== 'agy-gemini' && snap.tool !== 'agy-other') {
+    } else if (snap.limitType === 'session' && !snap.tool.includes('agy')) {
       parts.push(`${GRAY}[session]${R}`);
     }
   }
 
   if (snap.resetAt) parts.push(formatResetAt(snap.resetAt));
 
-  if ((snap.tool === 'agy-gemini' || snap.tool === 'agy-other') &&
-       snap.raw && typeof snap.raw === 'object') {
+  if (snap.tool.includes('agy') && snap.raw && typeof snap.raw === 'object') {
     let label = (snap.raw as Record<string, unknown>).matchedModel;
     if (typeof label === 'string' && label) {
       label = label.replace(/\s*-\s*(?:weekly|five\s*hour|5\s*h)\s*limit/i, '');
@@ -129,7 +132,7 @@ export function formatRow(snap: UsageSnapshot): string {
   const detailStr = parts.length > 0 ? ` ${parts.join(' ')}` : '';
   const isTotal = snap.tool === 'total';
   const labelPrefix = isTotal ? `${BOLD}${CYAN}` : BOLD;
-  return `${labelPrefix}${displayName.padEnd(13)}${R} [${barStr}] ${percentStr}${detailStr}`;
+  return `${labelPrefix}${displayName.padEnd(padWidth)}${R} [${barStr}] ${percentStr}${detailStr}`;
 }
 
 // ── Public render functions ────────────────────────────────────────────────
