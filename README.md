@@ -2,8 +2,8 @@
 
 > **Track and monitor token usage, credits, and quota limits** for your AI coding assistants — Claude Code, Codex CLI, and Antigravity/AGY — in a single unified terminal dashboard.
 
-[![npm version](https://img.shields.io/npm/v/agent-fuel.svg)](https://www.npmjs.com/package/agent-fuel)
-[![npm downloads](https://img.shields.io/npm/dm/agent-fuel.svg)](https://www.npmjs.com/package/agent-fuel)
+[![npm version](https://img.shields.io/npm/v/agent-fuel?color=blue)](https://www.npmjs.com/package/agent-fuel)
+[![npm downloads](https://img.shields.io/npm/dm/agent-fuel?color=green)](https://www.npmjs.com/package/agent-fuel)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 `agent-fuel` is a lightweight npm CLI tool that gives you a **real-time unified view of AI agent quota usage** across Claude Code, Codex, and AGY (Google Antigravity CLI) — supporting multiple accounts/profiles and custom shell aliases so you always know how much AI fuel you have left without switching between tools.
