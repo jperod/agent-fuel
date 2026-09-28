@@ -1,22 +1,44 @@
-import { exec, execFileSync } from 'node:child_process';
+import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import os from 'node:os';
-import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { QuotaAdapter, UsageSnapshot } from './index.js';
-import { TuiScraper, sleep, registerTempFile, unregisterTempFile } from '../tmux.js';
+import { TuiScraper, sleep } from '../tmux.js';
 import { debug } from '../debug.js';
 
 const execAsync = promisify(exec);
 
-import { AccountConfig } from '../config.js';
+import { AccountConfig, CONFIG_DIR } from '../config.js';
 
 // Used ONLY as a rough fallback estimate when the TUI scrape cannot determine
 // a percentage. This is a GUESS based on local session cost data — not an
 // official Codex quota signal. Override with AGENT_FUEL_CODEX_BUDGET env var.
 const DEFAULT_BUDGET_USD = 20.0;
 const ROLLING_WINDOW_MS = 5 * 60 * 60 * 1000;
+const STALE_CACHE_MAX_MS = 10 * 60 * 1000;
+
+function cachePath(account?: AccountConfig): string {
+  const identity = JSON.stringify([account?.id ?? 'codex', account?.command ?? 'codex', account?.env ?? {}]);
+  const key = crypto.createHash('sha256').update(identity).digest('hex').slice(0, 16);
+  return path.join(CONFIG_DIR, `codex-quota-${key}.json`);
+}
+
+async function readLastOfficial(account?: AccountConfig): Promise<UsageSnapshot | null> {
+  try {
+    const saved = JSON.parse(await fs.readFile(cachePath(account), 'utf8')) as { fetchedAt: number; snapshot: UsageSnapshot };
+    if (!Number.isFinite(saved.fetchedAt) || Date.now() - saved.fetchedAt > STALE_CACHE_MAX_MS ||
+        !saved.snapshot || saved.snapshot.source !== 'official-cli' || saved.snapshot.remainingPercent === null) return null;
+    return { ...saved.snapshot, source: 'cache' };
+  } catch { return null; }
+}
+
+async function saveOfficial(snapshot: UsageSnapshot, account?: AccountConfig): Promise<void> {
+  try {
+    await fs.mkdir(CONFIG_DIR, { recursive: true });
+    await fs.writeFile(cachePath(account), JSON.stringify({ fetchedAt: Date.now(), snapshot }), { mode: 0o600 });
+  } catch (err) { debug('codex:cache', 'could not save quota', String(err)); }
+}
 
 // ── TUI scraper (tmux) ─────────────────────────────────────────────────────
 
@@ -24,42 +46,29 @@ const ROLLING_WINDOW_MS = 5 * 60 * 60 * 1000;
 // Known dialogs and their dismissal key ("2" = skip/use existing):
 //   • Update nag:      "Update available! x.x → y.y"
 //   • New-model intro: "Introducing GPT-5.5"
-const CODEX_READY  = /Tip:/i;
+const CODEX_READY  = /Tip:|OpenAI Codex\s*\(v[\d.]+\)/i;
 const CODEX_DIALOG = /Update available|Introducing GPT|Try new model|Use existing model/i;
 const CODEX_EITHER = new RegExp(`(?:${CODEX_READY.source})|(?:${CODEX_DIALOG.source})`, 'i');
 const CODEX_STARTUP_MS          = 25_000;
 const CODEX_DIALOG_SETTLE_MS    =  1_000; // wait for UI to re-render after dismissing a dialog
-const CODEX_STATUS_REFRESH_MS   =  2_000; // first /status just triggers a quota refresh
-const CODEX_STATUS_READY_MS     =  4_000; // second /status carries the live quota data
+const CODEX_STATUS_TIMEOUT_MS   =  15_000;
 
 /**
- * Launches `codex` in a tmux session, pipes all terminal bytes to a temp
- * file, sends /status twice, then reads the file and returns the raw bytes.
+ * Launches `codex` in a tmux session and waits for a rendered /status panel.
+ * Capture the terminal screen instead of its raw escape stream: Codex redraws
+ * the panel in place, so raw bytes need not contain contiguous quota lines.
  */
 async function runCodexScrape(cmd = 'codex', env?: Record<string, string>): Promise<string> {
   const fullCmd = `CODEX_NON_INTERACTIVE=1 ${cmd}`;
   const tui = new TuiScraper(fullCmd, env);
-  
-  const tmpDir = os.tmpdir();
-  const randomSuffix = crypto.randomBytes(6).toString('hex');
-  const pipePath = path.join(tmpDir, `af-codex-${Date.now()}-${randomSuffix}.log`);
-  
-  registerTempFile(pipePath);
-  // Create the file with restricted permissions before tmux starts writing to it
-  writeFileSync(pipePath, '', { mode: 0o600 });
   try {
     tui.start();
-
-    // Stream all pane output to a file from the start.
-    const shellSafePath = "'" + pipePath.replace(/'/g, "'\\''") + "'";
-    execFileSync('tmux', ['pipe-pane', '-t', tui.sessionId, `cat >> ${shellSafePath}`]);
-    debug('codex:scrape', `pipe-pane logging to ${pipePath}`);
 
     // Wait for TUI ready, dismissing any blocking dialogs along the way.
     const dialogDeadline = Date.now() + CODEX_STARTUP_MS;
     let screen = await tui.waitFor(CODEX_EITHER, CODEX_STARTUP_MS, 0);
 
-    while (!CODEX_READY.test(screen)) {
+    while (CODEX_DIALOG.test(screen) || !CODEX_READY.test(screen)) {
       if (/Update available/i.test(screen)) {
         debug('codex:scrape', 'Update available dialog detected — sending Down + Enter to skip');
         tui.sendKey('Down');
@@ -77,22 +86,28 @@ async function runCodexScrape(cmd = 'codex', env?: Record<string, string>): Prom
       screen = await tui.waitFor(CODEX_EITHER, remaining, 0);
     }
 
-    // First /status: panel says "Limits: refresh requested; run /status again shortly"
+    // An initial /status can request a quota refresh. Retry the command if
+    // the rendered panel has not acquired any usable limit yet.
     tui.send('/status');
-    await sleep(CODEX_STATUS_REFRESH_MS);
-
-    // Second /status: has actual 5h/weekly quota data
-    tui.send('/status');
-    await sleep(CODEX_STATUS_READY_MS);
-
-    const raw = readFileSync(pipePath, 'utf-8');
-    debug('codex:scrape', `pipe log size: ${raw.length} bytes`);
-    return raw;
+    const deadline = Date.now() + CODEX_STATUS_TIMEOUT_MS;
+    let retried = false;
+    const retryAt = Date.now() + 2_000;
+    while (Date.now() < deadline) {
+      const rendered = tui.capture(100);
+      const parsed = parseScrapeOutput(rendered);
+      if (parsed.quotaReached || parsed.fiveHourRemainingPct !== null || parsed.weeklyRemainingPct != null) {
+        return rendered;
+      }
+      if (!retried && Date.now() >= retryAt) {
+        tui.send('/status');
+        retried = true;
+      }
+      await sleep(300);
+    }
+    throw new Error('Codex /status did not show quota data within 15 seconds');
 
   } finally {
     try { tui.kill(); } catch { /* already dead */ }
-    unregisterTempFile(pipePath); // always remove from registry, regardless of unlink success
-    try { unlinkSync(pipePath); } catch { /* ok if already gone */ }
   }
 }
 
@@ -116,17 +131,8 @@ function stripAnsi(str: string): string {
 }
 
 function parseScrapeOutput(raw: string): CodexScrapeResult {
-  // pipe-pane output contains raw ANSI bytes — strip before pattern matching
+  // Keep this compatible with both rendered tmux text and older ANSI output.
   const clean = stripAnsi(raw);
-  debug('codex:parse', `raw length: ${raw.length}, cleaned length: ${clean.length}`);
-  debug('codex:parse', 'cleaned output', clean);
-  debug('codex:parse', 'checking patterns', {
-    hasIndividualQuota: /Individual quota reached/i.test(clean),
-    hasHeadsUp: /less than \d+%\s+of your 5h limit left/i.test(clean),
-    has5hLimit: /5h limit:/i.test(clean),
-    hasWeeklyLimit: /Weekly limit:/i.test(clean),
-    hasLimits: /Limits:/i.test(clean),
-  });
 
   // "Individual quota reached. Contact your administrator to enable overages. Resets in 4h33m29s."
   if (/Individual quota reached/i.test(clean)) {
@@ -185,7 +191,6 @@ function parseScrapeOutput(raw: string): CodexScrapeResult {
     return { quotaReached: false, resetIn: null, fiveHourRemainingPct, fiveHourResetAt: null };
   }
 
-  debug('codex:parse', 'result', { quotaReached: false, fiveHourRemainingPct: null, fiveHourResetAt: null, fiveHMatchRaw: null });
   return { quotaReached: false, resetIn: null, fiveHourRemainingPct: null, fiveHourResetAt: null };
 }
 
@@ -204,7 +209,7 @@ async function fetchCcusageEstimate(budgetLimit: number, toolId = 'codex', displ
   try {
     let stdout: string;
     try {
-      ({ stdout } = await execAsync('npx --no-install ccusage codex session --json'));
+      ({ stdout } = await execAsync('npx --no-install ccusage codex session --json', { timeout: 5_000 }));
     } catch (err) {
       debug('codex:ccusage', 'ccusage exec failed', String(err));
       return unknown();
@@ -297,6 +302,8 @@ export class CodexQuotaAdapter implements QuotaAdapter {
     const displayName = this.account?.displayName || 'Codex';
     const cmd = this.account?.command || 'codex';
     const env = this.account?.env;
+    const fallback = async (): Promise<UsageSnapshot> =>
+      await readLastOfficial(this.account) ?? await fetchCcusageEstimate(this.budgetLimit, toolId, displayName);
 
     debug('codex:fetch', `starting TUI scrape for account ${toolId} (${cmd})`);
     try {
@@ -306,7 +313,7 @@ export class CodexQuotaAdapter implements QuotaAdapter {
       if (result.quotaReached) {
         const resetAt = result.resetIn ? `Resets in ${result.resetIn}` : null;
         debug('codex:fetch', 'quota reached → returning 0%');
-        return {
+        const snapshot: UsageSnapshot = {
           tool: toolId,
           displayName,
           remainingPercent: 0,
@@ -314,6 +321,8 @@ export class CodexQuotaAdapter implements QuotaAdapter {
           resetAt,
           source: 'official-cli',
         };
+        await saveOfficial(snapshot, this.account);
+        return snapshot;
       }
 
       const limits: { pct: number; reset: string | null; type: 'session' | 'weekly' }[] = [];
@@ -333,7 +342,7 @@ export class CodexQuotaAdapter implements QuotaAdapter {
         const weeklyLimitReached = result.weeklyRemainingPct === 0;
 
         debug('codex:fetch', `parsed /status → ${remainingPercent}% remaining (limiting factor: ${limiting.type})`);
-        return {
+        const snapshot: UsageSnapshot = {
           tool: toolId,
           displayName,
           remainingPercent,
@@ -347,14 +356,16 @@ export class CodexQuotaAdapter implements QuotaAdapter {
           weeklyLimitReached,
           source: 'official-cli',
         };
+        await saveOfficial(snapshot, this.account);
+        return snapshot;
       }
 
-      debug('codex:fetch', '/status parse failed → falling back to ccusage estimate');
-      return fetchCcusageEstimate(this.budgetLimit, toolId, displayName);
+      debug('codex:fetch', '/status parse failed → checking last official result');
+      return fallback();
 
     } catch (err) {
-      debug('codex:fetch', 'caught error, falling back to ccusage', String(err));
-      return fetchCcusageEstimate(this.budgetLimit, toolId, displayName);
+      debug('codex:fetch', 'scrape failed → checking last official result', String(err));
+      return fallback();
     }
   }
 }

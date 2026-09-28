@@ -9,6 +9,7 @@ import { AccountConfig } from '../config.js';
 
 const CACHE_PATH = path.join(os.homedir(), '.gemini/antigravity-cli/.agent-fuel-quota-cache.json');
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const STALE_CACHE_MAX_MS = 30 * 60 * 1000;
 
 interface ModelQuotaEntry {
   model: string;
@@ -19,6 +20,11 @@ interface ModelQuotaEntry {
 interface QuotaCache {
   fetchedAt: number;
   entries: ModelQuotaEntry[];
+}
+
+function hasBothGroups(entries: ModelQuotaEntry[]): boolean {
+  return entries.some(e => /gemini/i.test(e.model)) &&
+    entries.some(e => !/gemini/i.test(e.model));
 }
 
 // ── Scraping ───────────────────────────────────────────────────────────────
@@ -45,9 +51,23 @@ async function runAgyUsage(cmd = 'agy', env?: Record<string, string>): Promise<s
     tui.send('/usage');
     await tui.waitFor(/Models?\s*(?:&\s*)?Quota/i, 10_000);
 
-    // Brief pause for all model rows to finish rendering
-    await sleep(500);
-    return tui.capture();
+    // The heading appears before the quota rows. Wait until both groups and
+    // their five-hour and weekly limits have actually rendered.
+    const deadline = Date.now() + 10_000;
+    let lastScreen = '';
+    while (Date.now() < deadline) {
+      lastScreen = tui.capture();
+      const entries = parseQuotaPanel(lastScreen);
+      const gemini = entries.filter(e => /gemini/i.test(e.model));
+      const other = entries.filter(e => !/gemini/i.test(e.model));
+      const complete = [gemini, other].every(group =>
+        group.some(e => /weekly/i.test(e.model)) &&
+        group.some(e => /five\s*hour|5\s*h/i.test(e.model)));
+      if (complete) return lastScreen;
+      await sleep(300);
+    }
+    debug('agy:scrape', 'quota panel incomplete after 10 seconds', parseQuotaPanel(lastScreen));
+    return lastScreen;
 
   } finally {
     tui.kill();
@@ -142,7 +162,10 @@ function parseQuotaPanel(raw: string): ModelQuotaEntry[] {
 async function readCache(accountKey = 'default'): Promise<QuotaCache | null> {
   const cacheFile = CACHE_PATH.replace('.json', `-${accountKey}.json`);
   try {
-    return JSON.parse(await fs.readFile(cacheFile, 'utf-8')) as QuotaCache;
+    const cache = JSON.parse(await fs.readFile(cacheFile, 'utf-8')) as QuotaCache;
+    if (!Number.isFinite(cache.fetchedAt) || !Array.isArray(cache.entries) ||
+        !hasBothGroups(cache.entries) || Date.now() - cache.fetchedAt > STALE_CACHE_MAX_MS) return null;
+    return cache;
   } catch { return null; }
 }
 
@@ -245,10 +268,12 @@ export class AgyQuotaAdapter implements QuotaAdapter {
       const raw = await runAgyUsage(cmd, env);
       const entries = parseQuotaPanel(raw);
 
-      if (entries.length > 0) {
+      if (hasBothGroups(entries)) {
         await writeCache(entries, accountKey);
         return buildSnapshots(entries, false, this.account);
       }
+
+      if (cached) return buildSnapshots(cached.entries, true, this.account);
 
       const baseId = this.account?.id || 'agy';
       const baseName = this.account?.displayName || 'AGY';
@@ -258,6 +283,8 @@ export class AgyQuotaAdapter implements QuotaAdapter {
       ];
 
     } catch (error) {
+      if (cached) return buildSnapshots(cached.entries, true, this.account);
+      debug('agy:fetch', 'quota scrape failed', String(error));
       const msg = error instanceof Error ? error.message : String(error);
       const baseId = this.account?.id || 'agy';
       const baseName = this.account?.displayName || 'AGY';
@@ -268,4 +295,3 @@ export class AgyQuotaAdapter implements QuotaAdapter {
     }
   }
 }
-
