@@ -125,6 +125,10 @@ export function formatRow(snap: UsageSnapshot, padWidth = 13): string {
     parts.push(`${GRAY}[~est]${R}`);
   }
 
+  if (snap.source === 'cache') {
+    parts.push(`${GRAY}[cached]${R}`);
+  }
+
   if (snap.weeklyLimitReached) {
     parts.push(`${RED}⚠️ weekly limit${R}`);
   }
