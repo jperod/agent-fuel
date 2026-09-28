@@ -1,6 +1,6 @@
 {
   "name": "agent-fuel",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Monitor AI coding assistant quotas, credits & token usage — Claude Code, Codex, Antigravity (AGY) unified CLI dashboard",
   "type": "module",
   "main": "dist/index.js",
@@ -50,7 +50,7 @@
   },
   "homepage": "https://github.com/jperod/agent-fuel#readme",
   "devDependencies": {
-    "@types/node": "^25.9.1",
+    "@types/node": "^25.9.8",
     "typescript": "^6.0.3"
   }
 }

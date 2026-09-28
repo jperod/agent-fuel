@@ -134,7 +134,7 @@ AGY Other       [█████████████████████
 
 Total           [████████░░░░░░░░░░░░░░░░░░░░░░]  28% remaining  (tune weights: agent-fuel config)
 
-agent-fuel v0.8.0 • Last refreshed at: 20:27
+agent-fuel v0.8.1 • Last refreshed at: 20:27
 ```
 
 - **Total** bar prints on top showing the weighted consolidated remaining quota across all configured accounts.
