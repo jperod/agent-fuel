@@ -4,6 +4,7 @@ import { debugEnabled, debugLogFile } from './debug.js';
 import { ClaudeQuotaAdapter } from './adapters/claude.js';
 import { CodexQuotaAdapter } from './adapters/codex.js';
 import { AgyQuotaAdapter } from './adapters/agy.js';
+import { GrokQuotaAdapter } from './adapters/grok.js';
 import { QuotaAdapter, UsageSnapshot } from './adapters/index.js';
 import { printHeader, printFooter, formatRow, getDisplayName, SHADE_CHAR } from './render.js';
 import { loadConfig, handleConfigCommand, AccountConfig } from './config.js';
@@ -26,7 +27,7 @@ const config = loadConfig();
 
 // Build dynamic slot order & weight mapping
 function buildSlotInfo(accounts: AccountConfig[]) {
-  const typePriority: Record<string, number> = { claude: 1, codex: 2, agy: 3 };
+  const typePriority: Record<string, number> = { claude: 1, codex: 2, agy: 3, grok: 4 };
   const sortedAccounts = [...accounts].sort((a, b) => {
     const pA = typePriority[a.type] ?? 99;
     const pB = typePriority[b.type] ?? 99;
@@ -46,8 +47,10 @@ function buildSlotInfo(accounts: AccountConfig[]) {
       const otherName = acc.displayName.includes('Other') ? acc.displayName : `${acc.displayName} Other`;
 
       slotOrder.push(geminiId, otherId);
-      slotWeights.set(geminiId, acc.weight / 2);
-      slotWeights.set(otherId, acc.weight / 2);
+      const envGeminiWeight = process.env.AGENT_FUEL_WEIGHT_AGY_GEMINI ? Number(process.env.AGENT_FUEL_WEIGHT_AGY_GEMINI) : NaN;
+      const envOtherWeight = process.env.AGENT_FUEL_WEIGHT_AGY_OTHER ? Number(process.env.AGENT_FUEL_WEIGHT_AGY_OTHER) : NaN;
+      slotWeights.set(geminiId, Number.isFinite(envGeminiWeight) && envGeminiWeight >= 0 ? envGeminiWeight : acc.weight / 2);
+      slotWeights.set(otherId, Number.isFinite(envOtherWeight) && envOtherWeight >= 0 ? envOtherWeight : acc.weight / 2);
       slotDisplayNames.set(geminiId, geminiName);
       slotDisplayNames.set(otherId, otherName);
     } else {
@@ -205,6 +208,7 @@ async function main(): Promise<void> {
       case 'claude': return new ClaudeQuotaAdapter(acc);
       case 'codex':  return new CodexQuotaAdapter(acc);
       case 'agy':    return new AgyQuotaAdapter(acc);
+      case 'grok':   return new GrokQuotaAdapter(acc);
       default:       return new ClaudeQuotaAdapter(acc);
     }
   });

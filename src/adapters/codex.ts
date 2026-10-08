@@ -46,8 +46,8 @@ async function saveOfficial(snapshot: UsageSnapshot, account?: AccountConfig): P
 // Known dialogs and their dismissal key ("2" = skip/use existing):
 //   • Update nag:      "Update available! x.x → y.y"
 //   • New-model intro: "Introducing GPT-5.5"
-const CODEX_READY  = /Tip:|OpenAI Codex\s*\(v[\d.]+\)/i;
-const CODEX_DIALOG = /Update available|Introducing GPT|Try new model|Use existing model/i;
+const CODEX_READY  = /Tip:|Ask Codex to do anything|\? for shortcuts|OpenAI Codex\s*\(v[\d.]+\)/i;
+const CODEX_DIALOG = /Update available|Introducing GPT|Try new model|Use existing model|incompatible feature settings|Run without daemon/i;
 const CODEX_EITHER = new RegExp(`(?:${CODEX_READY.source})|(?:${CODEX_DIALOG.source})`, 'i');
 const CODEX_STARTUP_MS          = 25_000;
 const CODEX_DIALOG_SETTLE_MS    =  1_000; // wait for UI to re-render after dismissing a dialog
@@ -68,8 +68,20 @@ async function runCodexScrape(cmd = 'codex', env?: Record<string, string>): Prom
     const dialogDeadline = Date.now() + CODEX_STARTUP_MS;
     let screen = await tui.waitFor(CODEX_EITHER, CODEX_STARTUP_MS, 0);
 
+    // Codex may render the initial greeting screen briefly (~1s) before the background
+    // daemon connects and triggers blocking dialogs (e.g. incompatible feature settings).
+    // Allow a settle window to catch any asynchronously appearing dialogs.
+    const settleDeadline = Date.now() + 2_000;
+    while (Date.now() < settleDeadline && !CODEX_DIALOG.test(screen)) {
+      await sleep(200);
+      screen = tui.capture(0);
+    }
+
     while (CODEX_DIALOG.test(screen) || !CODEX_READY.test(screen)) {
-      if (/Update available/i.test(screen)) {
+      if (/incompatible feature settings|Run without daemon/i.test(screen)) {
+        debug('codex:scrape', 'Incompatible feature settings dialog detected — sending "1" to run without daemon');
+        tui.send('1');
+      } else if (/Update available/i.test(screen)) {
         debug('codex:scrape', 'Update available dialog detected — sending Down + Enter to skip');
         tui.sendKey('Down');
         await sleep(200);
@@ -88,18 +100,39 @@ async function runCodexScrape(cmd = 'codex', env?: Record<string, string>): Prom
 
     // An initial /status can request a quota refresh. Retry the command if
     // the rendered panel has not acquired any usable limit yet.
-    tui.send('/status');
+    // In Codex TUI, typing /status opens the slash autocomplete dropdown;
+    // a second Enter confirms and submits the command.
+    const sendStatus = async (): Promise<void> => {
+      debug('codex:scrape', 'sending /status command');
+      tui.send('/status');
+      await sleep(300);
+      tui.sendKey('Enter');
+    };
+
+    await sendStatus();
     const deadline = Date.now() + CODEX_STATUS_TIMEOUT_MS;
     let retried = false;
-    const retryAt = Date.now() + 2_000;
+    const retryAt = Date.now() + 2_500;
     while (Date.now() < deadline) {
       const rendered = tui.capture(100);
+      if (/incompatible feature settings|Run without daemon/i.test(rendered)) {
+        debug('codex:scrape', 'Incompatible feature settings dialog appeared during status loop — sending "1"');
+        tui.send('1');
+        await sleep(CODEX_DIALOG_SETTLE_MS);
+        await sendStatus();
+        continue;
+      }
       const parsed = parseScrapeOutput(rendered);
       if (parsed.quotaReached || parsed.fiveHourRemainingPct !== null || parsed.weeklyRemainingPct != null) {
         return rendered;
       }
+      // If /status is still unsubmitted on the input prompt, hit Enter again
+      if (/[›>]\s*\/status/i.test(rendered)) {
+        debug('codex:scrape', '/status still on input prompt — sending Enter again');
+        tui.sendKey('Enter');
+      }
       if (!retried && Date.now() >= retryAt) {
-        tui.send('/status');
+        await sendStatus();
         retried = true;
       }
       await sleep(300);
@@ -135,7 +168,7 @@ function parseScrapeOutput(raw: string): CodexScrapeResult {
   const clean = stripAnsi(raw);
 
   // "Individual quota reached. Contact your administrator to enable overages. Resets in 4h33m29s."
-  if (/Individual quota reached/i.test(clean)) {
+  if (/Individual quota reached|You(?:'ve| have) reached your usage limit|Rate limit reached/i.test(clean)) {
     const resetMatch = clean.match(/Resets in\s*((?:\d+h)?(?:\d+m)?(?:\d+s)?)/i);
     let resetIn: string | null = null;
     if (resetMatch) {
@@ -153,17 +186,17 @@ function parseScrapeOutput(raw: string): CodexScrapeResult {
 
   // Parse "/status" panel: "5h limit: [...] X% left (resets HH:MM)"
   // Use the LAST match — /status is sent twice and the second response is fresh.
-  const allFiveHMatches = [...clean.matchAll(/5h limit:\s*\[.*?\]\s*(\d+)%\s*left\s*\(resets\s+([^)]+)\)/gi)];
+  const allFiveHMatches = [...clean.matchAll(/5h limit:\s*(?:\[.*?\]\s*)?(\d+)%\s*left(?:\s*\(resets\s+([^)]+)\))?/gi)];
   const fiveHMatch = allFiveHMatches.at(-1) ?? null;
   
-  const allWeeklyMatches = [...clean.matchAll(/weekly limit:\s*\[.*?\]\s*(\d+)%\s*left\s*\(resets\s+([^)]+)\)/gi)];
+  const allWeeklyMatches = [...clean.matchAll(/weekly limit:\s*(?:\[.*?\]\s*)?(\d+)%\s*left(?:\s*\(resets\s+([^)]+)\))?/gi)];
   const weeklyMatch = allWeeklyMatches.at(-1) ?? null;
 
   if (fiveHMatch || weeklyMatch) {
     const fiveHourRemainingPct = fiveHMatch ? Math.min(100, Math.max(0, parseInt(fiveHMatch[1], 10))) : null;
-    const fiveHourResetAt = fiveHMatch ? fiveHMatch[2].trim() : null;
+    const fiveHourResetAt = fiveHMatch && fiveHMatch[2] ? fiveHMatch[2].trim() : null;
     const weeklyRemainingPct = weeklyMatch ? Math.min(100, Math.max(0, parseInt(weeklyMatch[1], 10))) : null;
-    const weeklyResetAt = weeklyMatch ? weeklyMatch[2].trim() : null;
+    const weeklyResetAt = weeklyMatch && weeklyMatch[2] ? weeklyMatch[2].trim() : null;
     
     debug('codex:parse', 'result', {
       quotaReached: false,

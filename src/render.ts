@@ -32,6 +32,7 @@ export function getDisplayName(input: string | UsageSnapshot): string {
     case 'claude-code': return 'Claude Code';
     case 'agy-gemini':  return 'AGY Gemini';
     case 'agy-other':   return 'AGY Other';
+    case 'grok':        return 'Grok Build';
     case 'total':       return 'Total';
     default:            return input;
   }

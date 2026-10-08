@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
-export type ToolType = 'claude' | 'codex' | 'agy';
+export type ToolType = 'claude' | 'codex' | 'agy' | 'grok';
 
 export interface AccountConfig {
   id: string;
@@ -77,7 +77,7 @@ export function loadConfig(): Config {
           config.accounts = parsed.accounts.map((ac: any) => ({
             id: String(ac.id || ac.displayName || 'account'),
             displayName: String(ac.displayName || ac.id || 'Account'),
-            type: (['claude', 'codex', 'agy'].includes(ac.type) ? ac.type : 'claude') as ToolType,
+            type: (['claude', 'codex', 'agy', 'grok'].includes(ac.type) ? ac.type : 'claude') as ToolType,
             command: ac.command ? String(ac.command) : undefined,
             env: ac.env && typeof ac.env === 'object' ? ac.env : undefined,
             weight: typeof ac.weight === 'number' && Number.isFinite(ac.weight) && ac.weight >= 0 ? ac.weight : 20,
@@ -130,6 +130,18 @@ export function loadConfig(): Config {
     if (envShowTotal.toLowerCase() === 'false') config.showTotal = false;
   }
 
+  for (const acc of config.accounts) {
+    const envKeyId = `AGENT_FUEL_WEIGHT_${acc.id.toUpperCase().replace(/-/g, '_')}`;
+    const envKeyType = `AGENT_FUEL_WEIGHT_${acc.type.toUpperCase().replace(/-/g, '_')}`;
+    const rawWeight = process.env[envKeyId] ?? process.env[envKeyType];
+    if (rawWeight !== undefined) {
+      const parsed = Number(rawWeight);
+      if (Number.isFinite(parsed) && parsed >= 0) {
+        acc.weight = parsed;
+      }
+    }
+  }
+
   return config;
 }
 
@@ -176,6 +188,7 @@ export function handleConfigCommand(args: string[]): boolean {
     console.log(`${BOLD}Examples:${R}`);
     console.log(`  agent-fuel config add-account claude-personal --type claude --name "Claude Personal" --env CLAUDE_CONFIG_DIR=~/.claude-personal`);
     console.log(`  agent-fuel config add-account codex-work --type codex --name "Codex Work" --cmd codex-work`);
+    console.log(`  agent-fuel config add-account grok --type grok --name "Grok Build"`);
     console.log(`  agent-fuel config remove-account claude-personal`);
     console.log(`  agent-fuel config set claude-code weight 50`);
     console.log(`  agent-fuel config set show-total false`);
@@ -186,7 +199,7 @@ export function handleConfigCommand(args: string[]): boolean {
   if (subCommand === 'add-account') {
     const id = args[2];
     if (!id || id.startsWith('-')) {
-      console.error(`\n${BOLD}${RED}Error:${R} Usage: agent-fuel config add-account <id> --type <claude|codex|agy> [--name "Name"] [--cmd "command"] [--env KEY=VAL] [--weight N]\n`);
+      console.error(`\n${BOLD}${RED}Error:${R} Usage: agent-fuel config add-account <id> --type <claude|codex|agy|grok> [--name "Name"] [--cmd "command"] [--env KEY=VAL] [--weight N]\n`);
       process.exit(1);
     }
 
@@ -200,10 +213,10 @@ export function handleConfigCommand(args: string[]): boolean {
       const arg = args[i];
       if (arg === '--type' && args[i + 1]) {
         const t = args[i + 1].toLowerCase();
-        if (['claude', 'codex', 'agy'].includes(t)) {
+        if (['claude', 'codex', 'agy', 'grok'].includes(t)) {
           type = t as ToolType;
         } else {
-          console.error(`\n${BOLD}${RED}Error:${R} Invalid type "${t}". Must be claude, codex, or agy.\n`);
+          console.error(`\n${BOLD}${RED}Error:${R} Invalid type "${t}". Must be claude, codex, agy, or grok.\n`);
           process.exit(1);
         }
         i++;
