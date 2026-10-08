@@ -130,6 +130,18 @@ export function loadConfig(): Config {
     if (envShowTotal.toLowerCase() === 'false') config.showTotal = false;
   }
 
+  for (const acc of config.accounts) {
+    const envKeyId = `AGENT_FUEL_WEIGHT_${acc.id.toUpperCase().replace(/-/g, '_')}`;
+    const envKeyType = `AGENT_FUEL_WEIGHT_${acc.type.toUpperCase().replace(/-/g, '_')}`;
+    const rawWeight = process.env[envKeyId] ?? process.env[envKeyType];
+    if (rawWeight !== undefined) {
+      const parsed = Number(rawWeight);
+      if (Number.isFinite(parsed) && parsed >= 0) {
+        acc.weight = parsed;
+      }
+    }
+  }
+
   return config;
 }
 

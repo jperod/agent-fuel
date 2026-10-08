@@ -47,8 +47,10 @@ function buildSlotInfo(accounts: AccountConfig[]) {
       const otherName = acc.displayName.includes('Other') ? acc.displayName : `${acc.displayName} Other`;
 
       slotOrder.push(geminiId, otherId);
-      slotWeights.set(geminiId, acc.weight / 2);
-      slotWeights.set(otherId, acc.weight / 2);
+      const envGeminiWeight = process.env.AGENT_FUEL_WEIGHT_AGY_GEMINI ? Number(process.env.AGENT_FUEL_WEIGHT_AGY_GEMINI) : NaN;
+      const envOtherWeight = process.env.AGENT_FUEL_WEIGHT_AGY_OTHER ? Number(process.env.AGENT_FUEL_WEIGHT_AGY_OTHER) : NaN;
+      slotWeights.set(geminiId, Number.isFinite(envGeminiWeight) && envGeminiWeight >= 0 ? envGeminiWeight : acc.weight / 2);
+      slotWeights.set(otherId, Number.isFinite(envOtherWeight) && envOtherWeight >= 0 ? envOtherWeight : acc.weight / 2);
       slotDisplayNames.set(geminiId, geminiName);
       slotDisplayNames.set(otherId, otherName);
     } else {

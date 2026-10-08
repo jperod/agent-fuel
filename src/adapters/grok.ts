@@ -1,7 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import os from 'node:os';
 import crypto from 'node:crypto';
 import { QuotaAdapter, UsageSnapshot } from './index.js';
 import { TuiScraper, sleep } from '../tmux.js';
@@ -44,7 +43,9 @@ async function saveOfficial(snapshot: UsageSnapshot, account?: AccountConfig): P
 
 function isCommandAvailable(cmd: string): boolean {
   try {
-    execFileSync('which', [cmd], { stdio: 'ignore', timeout: 3000 });
+    const bin = cmd.trim().split(/\s+/)[0];
+    if (!bin) return false;
+    execFileSync('which', [bin], { stdio: 'ignore', timeout: 3000 });
     return true;
   } catch {
     return false;
@@ -188,8 +189,7 @@ function parseGrokOutput(raw: string): GrokScrapeResult {
  * Launches `grok` in a tmux session, navigates to `/usage`, and captures the rendered limits.
  */
 async function runGrokScrape(cmd = 'grok', env?: Record<string, string>): Promise<string> {
-  const fullCmd = `GROK_NON_INTERACTIVE=1 ${cmd}`;
-  const tui = new TuiScraper(fullCmd, env);
+  const tui = new TuiScraper(cmd, env);
 
   try {
     tui.start();
