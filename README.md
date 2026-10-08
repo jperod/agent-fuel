@@ -1,12 +1,12 @@
 # ⚡️ Agent Fuel — AI Coding CLI Quota & Token Usage Monitor
 
-> **Track and monitor token usage, credits, and quota limits** for your AI coding assistants — Claude Code, Codex CLI, and Antigravity/AGY — in a single unified terminal dashboard.
+> **Track and monitor token usage, credits, and quota limits** for your AI coding assistants — Claude Code, Codex CLI, Antigravity/AGY, and Grok Build — in a single unified terminal dashboard.
 
 [![npm version](https://img.shields.io/npm/v/agent-fuel?color=blue)](https://www.npmjs.com/package/agent-fuel)
 [![npm downloads](https://img.shields.io/npm/dm/agent-fuel?color=green)](https://www.npmjs.com/package/agent-fuel)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-`agent-fuel` is a lightweight npm CLI tool that gives you a **real-time unified view of AI agent quota usage** across Claude Code, Codex, and AGY (Google Antigravity CLI) — supporting multiple accounts/profiles and custom shell aliases so you always know how much AI fuel you have left without switching between tools.
+`agent-fuel` is a lightweight npm CLI tool that gives you a **real-time unified view of AI agent quota usage** across Claude Code, Codex, AGY (Google Antigravity CLI), and Grok Build (xAI / SpaceXAI) — supporting multiple accounts/profiles and custom shell aliases so you always know how much AI fuel you have left without switching between tools.
 
 ---
 
@@ -38,7 +38,7 @@ npm link
 
 ## 🔍 What Problem Does This Solve?
 
-If you use **multiple AI coding assistants** (like Claude Code, Codex CLI, and Google's Antigravity CLI `agy`), or **multiple accounts** of the same tool (e.g., work vs personal Claude/Codex profiles):
+If you use **multiple AI coding assistants** (like Claude Code, Codex CLI, Google's Antigravity CLI `agy`, and xAI's Grok Build `grok`), or **multiple accounts** of the same tool (e.g., work vs personal Claude/Codex profiles):
 
 - **Fragmented quota tracking**: each tool/account has separate credit limits with no central view
 - **Inconsistent direction**: some tools show *remaining* %, others show *consumed* % — impossible to compare at a glance
@@ -46,13 +46,13 @@ If you use **multiple AI coding assistants** (like Claude Code, Codex CLI, and G
 
 **Agent Fuel** solves this with one command: `agent-fuel`. It normalises all limits into a single **Percent Remaining** metric, supports N accounts for any tool type, and streams them live in one terminal dashboard.
 
-> **Supports:** Claude Code (Multi-account) · Codex CLI (Multi-account) · Antigravity CLI (AGY / Google Gemini)
+> **Supports:** Claude Code (Multi-account) · Codex CLI (Multi-account) · Antigravity CLI (AGY / Google Gemini) · Grok Build (xAI / SpaceXAI)
 
 ---
 
 ## 💡 The Motivation
 
-AI coding assistants are now integral to developer workflows. Modern developers often use **multiple agentic CLI tools and multiple accounts** (such as `claude` and `claude-personal`, work Codex, and AGY), switching back and forth depending on the task.
+AI coding assistants are now integral to developer workflows. Modern developers often use **multiple agentic CLI tools and multiple accounts** (such as `claude` and `claude-personal`, work Codex, AGY, and Grok Build), switching back and forth depending on the task.
 
 However, keeping track of your remaining fuel is a major hassle due to three reasons:
 
@@ -71,7 +71,7 @@ However, keeping track of your remaining fuel is a major hassle due to three rea
 1. **Dispatches Adapters concurrently** — all configured accounts run in parallel and each row is printed the moment its adapter resolves.
 2. **Multi-Account & Shell Alias Aware** — resolves custom environment variables (e.g., `CLAUDE_CONFIG_DIR=~/.claude-personal`) and shell aliases inside tmux scraper sessions.
 3. **Streams Consolidated Quota Live** — renders a weighted **Total** bar on top which calculates and updates in real-time as each provider finishes loading.
-4. **Tool-Type Grouping** — groups accounts logically by tool type (`Claude` accounts together, `Codex` accounts together, `AGY` accounts together).
+4. **Tool-Type Grouping** — groups accounts logically by tool type (`Claude` accounts together, `Codex` accounts together, `AGY` accounts together, `Grok Build` accounts together).
 5. **Dynamic Alignment** — dynamically calculates column width so progress bars align perfectly across custom display names.
 
 ### Project Architecture
@@ -87,7 +87,8 @@ agent-fuel/
   │       ├── index.ts        # Shared UsageSnapshot type & QuotaAdapter interface
   │       ├── claude.ts       # Claude Code (multi-account TUI scrape & prompt handler)
   │       ├── codex.ts        # Codex CLI (expect TUI scrape; ccusage fallback)
-  │       └── agy.ts          # AGY — split into Gemini + Other buckets per account
+  │       ├── agy.ts          # AGY — split into Gemini + Other buckets per account
+  │       └── grok.ts         # Grok Build (xAI / SpaceXAI TUI scrape & session limits)
   ├── package.json
   └── README.md
 ```
@@ -131,14 +132,15 @@ Claude Personal [████████░░░░░░░░░░░░░
 Codex           [███░░░░░░░░░░░░░░░░░░░░░░░░░░░]  11% remaining [weekly] (resets 09:10 on 5 Aug)
 AGY Gemini      [█████████████████░░░░░░░░░░░░░]  56% remaining (5h: 92% | wk: 56%) (resets in 95h 16m) [GEMINI MODELS]
 AGY Other       [██████████████████████████████] 100% remaining (5h: 100% | wk: 100%) ✓ quota available [CLAUDE AND GPT MODELS]
+Grok Build      [█████████████████████░░░░░░░░░]  70% remaining (5h: 85% | wk: 70%) (resets in 18h)
 
-Total           [████████░░░░░░░░░░░░░░░░░░░░░░]  28% remaining  (tune weights: agent-fuel config)
+Total           [████████░░░░░░░░░░░░░░░░░░░░░░]  34% remaining  (tune weights: agent-fuel config)
 
-agent-fuel v0.8.1 • Last refreshed at: 20:27
+agent-fuel v0.8.2 • Last refreshed at: 20:27
 ```
 
 - **Total** bar prints on top showing the weighted consolidated remaining quota across all configured accounts.
-- **Grouped Display**: All `Claude` accounts render together, followed by `Codex` and `AGY`.
+- **Grouped Display**: All `Claude` accounts render together, followed by `Codex`, `AGY`, and `Grok Build`.
 - **Limit Breakdown**: Session vs weekly limits shown in metadata (e.g. `(5h: 96% | wk: 25%)`).
 
 ---
@@ -159,6 +161,14 @@ You can list, add, remove, and update accounts directly using the CLI:
   ```bash
   agent-fuel config add-account claude-personal --type claude --name "Claude Personal" --env CLAUDE_CONFIG_DIR=~/.claude-personal
   ```
+- **Add a Standard Grok Build Account**:
+  ```bash
+  agent-fuel config add-account grok --type grok --name "Grok Build"
+  ```
+- **Add a Work / Secondary Grok Build Account** (with custom config dir or API key):
+  ```bash
+  agent-fuel config add-account grok-work --type grok --name "Grok Work" --env GROK_HOME=~/.grok-work --env XAI_API_KEY="xai-..."
+  ```
 - **Add a Custom Codex Account**:
   ```bash
   agent-fuel config add-account codex-work --type codex --name "Codex Work" --cmd codex-work
@@ -169,14 +179,63 @@ You can list, add, remove, and update accounts directly using the CLI:
   ```
 - **Set Weight for an Account**:
   ```bash
-  agent-fuel config set claude-code weight 50
+  agent-fuel config set grok weight 30
   ```
 - **Disable/Enable Total Bar**:
   ```bash
   agent-fuel config set show-total false
   ```
 
-Settings are persistently saved to `~/.config/agent-fuel/config.json`.
+### Example `~/.config/agent-fuel/config.json`
+
+Here is an example configuration file monitoring Claude, Codex, AGY, and Grok Build simultaneously:
+
+```json
+{
+  "accounts": [
+    {
+      "id": "claude-code",
+      "displayName": "Claude Code",
+      "type": "claude",
+      "command": "claude",
+      "weight": 20
+    },
+    {
+      "id": "codex",
+      "displayName": "Codex",
+      "type": "codex",
+      "command": "codex",
+      "weight": 20
+    },
+    {
+      "id": "agy",
+      "displayName": "AGY",
+      "type": "agy",
+      "command": "agy",
+      "weight": 20
+    },
+    {
+      "id": "grok",
+      "displayName": "Grok Build",
+      "type": "grok",
+      "command": "grok",
+      "weight": 20
+    },
+    {
+      "id": "grok-work",
+      "displayName": "Grok Work",
+      "type": "grok",
+      "command": "grok",
+      "env": {
+        "GROK_HOME": "~/.grok-work",
+        "XAI_API_KEY": "xai-..."
+      },
+      "weight": 20
+    }
+  ],
+  "showTotal": true
+}
+```
 
 ---
 
@@ -192,6 +251,9 @@ Environment variables take highest precedence and override any values saved in t
 | `AGENT_FUEL_WEIGHT_CODEX`      | `20`    | Weight size ratio of the Codex quota pool                      |
 | `AGENT_FUEL_WEIGHT_AGY_GEMINI` | `10`    | Weight size ratio of the AGY Gemini quota pool                 |
 | `AGENT_FUEL_WEIGHT_AGY_OTHER`  | `10`    | Weight size ratio of the AGY Other quota pool                  |
+| `AGENT_FUEL_WEIGHT_GROK`       | `20`    | Weight size ratio of the Grok Build quota pool                 |
 | `AGENT_FUEL_SHOW_TOTAL`        | `true`  | Show or hide the consolidated Total quota bar (`true`/`false`) |
 
-> **Note on `AGENT_FUEL_CODEX_BUDGET`:** Codex quota is read directly from the Codex TUI via `expect` scraping. This variable is only used as a rough fallback estimate (shown as `[~est]`) when the TUI reports no quota warning and a percentage cannot be determined. It is a guess based on local session cost data — not an official Codex quota signal. The TUI scrape is always preferred.
+> **Note on `AGENT_FUEL_CODEX_BUDGET`:** Codex quota is read directly from the Codex TUI via scraping. This variable is only used as a rough fallback estimate (shown as `[~est]`) when the TUI reports no quota warning and a percentage cannot be determined. It is a guess based on local session cost data — not an official Codex quota signal. The TUI scrape is always preferred.
+
+> **Note on Grok Build:** Grok Build quota and credit usage are read directly from the Grok Build TUI via headless tmux scraping (`/usage` or `/cost`), querying live allowance and rolling window limits while respecting custom `GROK_HOME` and `XAI_API_KEY` configurations.

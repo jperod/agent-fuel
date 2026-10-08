@@ -4,6 +4,7 @@ import { debugEnabled, debugLogFile } from './debug.js';
 import { ClaudeQuotaAdapter } from './adapters/claude.js';
 import { CodexQuotaAdapter } from './adapters/codex.js';
 import { AgyQuotaAdapter } from './adapters/agy.js';
+import { GrokQuotaAdapter } from './adapters/grok.js';
 import { QuotaAdapter, UsageSnapshot } from './adapters/index.js';
 import { printHeader, printFooter, formatRow, getDisplayName, SHADE_CHAR } from './render.js';
 import { loadConfig, handleConfigCommand, AccountConfig } from './config.js';
@@ -26,7 +27,7 @@ const config = loadConfig();
 
 // Build dynamic slot order & weight mapping
 function buildSlotInfo(accounts: AccountConfig[]) {
-  const typePriority: Record<string, number> = { claude: 1, codex: 2, agy: 3 };
+  const typePriority: Record<string, number> = { claude: 1, codex: 2, agy: 3, grok: 4 };
   const sortedAccounts = [...accounts].sort((a, b) => {
     const pA = typePriority[a.type] ?? 99;
     const pB = typePriority[b.type] ?? 99;
@@ -205,6 +206,7 @@ async function main(): Promise<void> {
       case 'claude': return new ClaudeQuotaAdapter(acc);
       case 'codex':  return new CodexQuotaAdapter(acc);
       case 'agy':    return new AgyQuotaAdapter(acc);
+      case 'grok':   return new GrokQuotaAdapter(acc);
       default:       return new ClaudeQuotaAdapter(acc);
     }
   });

@@ -124,7 +124,7 @@ export class TuiScraper {
     const args = historyLines > 0
       ? ['capture-pane', '-t', this.sessionId, '-S', `-${historyLines}`, '-p']
       : ['capture-pane', '-t', this.sessionId, '-p'];
-    const text = execFileSync('tmux', args, { timeout: 5000 }).toString();
+    const text = execFileSync('tmux', args, { stdio: 'pipe', timeout: 5000 }).toString();
     debug('tmux:capture', `[${this.sessionId}] captured ${text.length} chars (history=${historyLines})`);
     return text;
   }
