@@ -16,7 +16,7 @@ import { AccountConfig, CONFIG_DIR } from '../config.js';
 // official Codex quota signal. Override with AGENT_FUEL_CODEX_BUDGET env var.
 const DEFAULT_BUDGET_USD = 20.0;
 const ROLLING_WINDOW_MS = 5 * 60 * 60 * 1000;
-const STALE_CACHE_MAX_MS = 10 * 60 * 1000;
+const STALE_CACHE_MAX_MS = 60 * 60 * 1000;
 
 function cachePath(account?: AccountConfig): string {
   const identity = JSON.stringify([account?.id ?? 'codex', account?.command ?? 'codex', account?.env ?? {}]);
@@ -46,9 +46,10 @@ async function saveOfficial(snapshot: UsageSnapshot, account?: AccountConfig): P
 // Known dialogs and their dismissal key ("2" = skip/use existing):
 //   • Update nag:      "Update available! x.x → y.y"
 //   • New-model intro: "Introducing GPT-5.5"
-const CODEX_READY  = /Tip:|Ask Codex to do anything|\? for shortcuts|OpenAI Codex\s*\(v[\d.]+\)/i;
-const CODEX_DIALOG = /Update available|Introducing GPT|Try new model|Use existing model|incompatible feature settings|Run without daemon/i;
-const CODEX_EITHER = new RegExp(`(?:${CODEX_READY.source})|(?:${CODEX_DIALOG.source})`, 'i');
+const CODEX_READY    = /Tip:|Ask Codex to do anything|\? for shortcuts|OpenAI Codex\s*\(v[\d.]+\)/i;
+const CODEX_DIALOG   = /Update available|Introducing GPT|Try new model|Use existing model|incompatible feature settings|Run without daemon/i;
+const CODEX_UPDATING = /Updating Codex via|Downloading Codex CLI|Installing standalone package|Update ran successfully|Please restart Codex/i;
+const CODEX_EITHER   = new RegExp(`(?:${CODEX_READY.source})|(?:${CODEX_DIALOG.source})|(?:${CODEX_UPDATING.source})`, 'i');
 const CODEX_STARTUP_MS          = 25_000;
 const CODEX_DIALOG_SETTLE_MS    =  1_000; // wait for UI to re-render after dismissing a dialog
 const CODEX_STATUS_TIMEOUT_MS   =  15_000;
@@ -58,7 +59,7 @@ const CODEX_STATUS_TIMEOUT_MS   =  15_000;
  * Capture the terminal screen instead of its raw escape stream: Codex redraws
  * the panel in place, so raw bytes need not contain contiguous quota lines.
  */
-async function runCodexScrape(cmd = 'codex', env?: Record<string, string>): Promise<string> {
+async function runCodexScrape(cmd = 'codex', env?: Record<string, string>, retryCount = 0): Promise<string> {
   const fullCmd = `CODEX_NON_INTERACTIVE=1 ${cmd}`;
   const tui = new TuiScraper(fullCmd, env);
   try {
@@ -68,24 +69,63 @@ async function runCodexScrape(cmd = 'codex', env?: Record<string, string>): Prom
     const dialogDeadline = Date.now() + CODEX_STARTUP_MS;
     let screen = await tui.waitFor(CODEX_EITHER, CODEX_STARTUP_MS, 0);
 
+    // If an auto-update is running, wait for it to complete, then restart scrape
+    if (CODEX_UPDATING.test(screen)) {
+      debug('codex:scrape', 'Codex auto-update detected in progress — waiting for installer to complete');
+      const updateDeadline = Date.now() + 45_000;
+      while (Date.now() < updateDeadline && tui.isAlive()) {
+        const text = tui.capture(100);
+        if (/Update ran successfully|Please restart Codex/i.test(text)) {
+          break;
+        }
+        await sleep(500);
+      }
+      tui.kill();
+      if (retryCount < 1) {
+        debug('codex:scrape', 'Codex auto-update finished — restarting scrape with updated binary');
+        await sleep(1_000);
+        return runCodexScrape(cmd, env, retryCount + 1);
+      }
+      throw new Error('Codex auto-update in progress');
+    }
+
     // Codex may render the initial greeting screen briefly (~1s) before the background
     // daemon connects and triggers blocking dialogs (e.g. incompatible feature settings).
     // Allow a settle window to catch any asynchronously appearing dialogs.
     const settleDeadline = Date.now() + 2_000;
-    while (Date.now() < settleDeadline && !CODEX_DIALOG.test(screen)) {
+    while (Date.now() < settleDeadline && !CODEX_DIALOG.test(screen) && !CODEX_UPDATING.test(screen)) {
       await sleep(200);
       screen = tui.capture(0);
     }
 
+    if (CODEX_UPDATING.test(screen)) {
+      debug('codex:scrape', 'Codex auto-update detected during settle window');
+      tui.kill();
+      if (retryCount < 1) {
+        await sleep(1_000);
+        return runCodexScrape(cmd, env, retryCount + 1);
+      }
+      throw new Error('Codex auto-update in progress');
+    }
+
     while (CODEX_DIALOG.test(screen) || !CODEX_READY.test(screen)) {
+      if (CODEX_UPDATING.test(screen)) {
+        debug('codex:scrape', 'Codex auto-update detected in dialog loop');
+        tui.kill();
+        if (retryCount < 1) {
+          await sleep(1_000);
+          return runCodexScrape(cmd, env, retryCount + 1);
+        }
+        throw new Error('Codex auto-update in progress');
+      }
       if (/incompatible feature settings|Run without daemon/i.test(screen)) {
         debug('codex:scrape', 'Incompatible feature settings dialog detected — sending "1" to run without daemon');
         tui.send('1');
       } else if (/Update available/i.test(screen)) {
-        debug('codex:scrape', 'Update available dialog detected — sending Down + Enter to skip');
-        tui.sendKey('Down');
+        debug('codex:scrape', 'Update available dialog detected — sending "2" to skip update');
+        tui.send('2');
         await sleep(200);
-        tui.sendKey('Enter');
+        tui.sendKey('Escape');
       } else {
         debug('codex:scrape', 'blocking dialog detected — sending "2" to dismiss');
         tui.send('2');
