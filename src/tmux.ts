@@ -76,6 +76,7 @@ function expandTilde(p: string): string {
 
 export class TuiScraper {
   readonly sessionId: string;
+  private lastCaptured = '';
 
   constructor(
     private readonly command: string,
@@ -84,6 +85,15 @@ export class TuiScraper {
     private readonly height = 50,
   ) {
     this.sessionId = `af-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+  }
+
+  isAlive(): boolean {
+    try {
+      execFileSync('tmux', ['has-session', '-t', this.sessionId], { stdio: 'ignore', timeout: 3000 });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   start(): void {
@@ -124,9 +134,15 @@ export class TuiScraper {
     const args = historyLines > 0
       ? ['capture-pane', '-t', this.sessionId, '-S', `-${historyLines}`, '-p']
       : ['capture-pane', '-t', this.sessionId, '-p'];
-    const text = execFileSync('tmux', args, { stdio: 'pipe', timeout: 5000 }).toString();
-    debug('tmux:capture', `[${this.sessionId}] captured ${text.length} chars (history=${historyLines})`);
-    return text;
+    try {
+      const text = execFileSync('tmux', args, { stdio: 'pipe', timeout: 5000 }).toString();
+      debug('tmux:capture', `[${this.sessionId}] captured ${text.length} chars (history=${historyLines})`);
+      this.lastCaptured = text;
+      return text;
+    } catch (err) {
+      debug('tmux:capture', `[${this.sessionId}] capture failed or session ended: ${String(err)}`);
+      return this.lastCaptured;
+    }
   }
 
   send(text: string): void {
@@ -147,6 +163,10 @@ export class TuiScraper {
       const text = this.capture(historyLines);
       if (pattern.test(text)) {
         debug('tmux:waitFor', `[${this.sessionId}] matched ${pattern}`);
+        return text;
+      }
+      if (!this.isAlive()) {
+        debug('tmux:waitFor', `[${this.sessionId}] session exited early while waiting for ${pattern}`);
         return text;
       }
       await sleep(100);
