@@ -182,6 +182,7 @@ function parseScrapedScreen(screen: string, account?: AccountConfig): UsageSnaps
   // Pattern 2: "Resets <Date>"
   const resetMatch = screen.match(/Resets\s+([A-Za-z]+\s+\d+)/i);
   const resetAt = resetMatch ? resetMatch[1] : null;
+  const isFreeTier = /Free plan|Hobby|\(Free\)/i.test(screen);
 
   return {
     tool: account?.id ?? 'cursor',
@@ -190,6 +191,7 @@ function parseScrapedScreen(screen: string, account?: AccountConfig): UsageSnaps
     usedPercent: used,
     resetAt,
     limitType: 'weekly',
+    isFreeTier,
     source: 'official-cli',
   };
 }

@@ -250,6 +250,7 @@ export class ClaudeQuotaAdapter implements QuotaAdapter {
         const resetAt = limiting.reset;
         const weeklyLimitReached = weeklyRemaining === 0;
 
+        const isFreeTier = /Free plan|\(Free\)/i.test(screen);
         return {
           tool: toolId,
           displayName,
@@ -261,6 +262,7 @@ export class ClaudeQuotaAdapter implements QuotaAdapter {
             fiveHour: sessionRemaining,
             weekly: weeklyRemaining,
           } : undefined,
+          isFreeTier,
           weeklyLimitReached,
           source: 'official-cli',
         };

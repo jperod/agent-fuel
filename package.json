@@ -1,6 +1,6 @@
 {
   "name": "agent-fuel",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "description": "Monitor AI coding assistant quotas, credits & token usage — Claude Code, Codex, Cursor Agent, Antigravity (AGY), Grok unified CLI dashboard",
   "type": "module",
   "main": "dist/index.js",

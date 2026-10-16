@@ -85,7 +85,8 @@ function formatResetAt(resetAt: string): string {
   if (agyMatch) {
     return `${GRAY}(resets in ${agyMatch[1]})${R}`;
   }
-  return `${GRAY}(resets ${resetAt})${R}`;
+  const clean = resetAt.replace(/^resets\s+/i, '');
+  return `${GRAY}(resets ${clean})${R}`;
 }
 
 function isEstimate(snap: UsageSnapshot): boolean {
@@ -116,13 +117,23 @@ export function formatRow(snap: UsageSnapshot, padWidth = 13): string {
 
   if (snap.breakdown && typeof snap.breakdown.fiveHour === 'number' && typeof snap.breakdown.weekly === 'number') {
     parts.push(`${GRAY}(5h: ${snap.breakdown.fiveHour}% | wk: ${snap.breakdown.weekly}%)${R}`);
+  } else if (snap.breakdown && typeof snap.breakdown.fiveHour === 'number' && typeof snap.breakdown.monthly === 'number') {
+    parts.push(`${GRAY}(5h: ${snap.breakdown.fiveHour}% | mo: ${snap.breakdown.monthly}%)${R}`);
+  } else if (snap.breakdown && typeof snap.breakdown.weekly === 'number' && typeof snap.breakdown.monthly === 'number') {
+    parts.push(`${GRAY}(wk: ${snap.breakdown.weekly}% | mo: ${snap.breakdown.monthly}%)${R}`);
   } else if (snap.breakdown && typeof snap.breakdown.weekly === 'number') {
     parts.push(`${GRAY}(wk: ${snap.breakdown.weekly}%)${R}`);
+  } else if (snap.breakdown && typeof snap.breakdown.monthly === 'number') {
+    parts.push(`${GRAY}(mo: ${snap.breakdown.monthly}%)${R}`);
   } else {
     if (snap.limitType === 'weekly' && !snap.tool.includes('agy')) {
       parts.push(`${GRAY}[weekly]${R}`);
     } else if (snap.limitType === 'session' && !snap.tool.includes('agy')) {
       parts.push(`${GRAY}[session]${R}`);
+    } else if (snap.limitType === 'monthly' && !snap.tool.includes('agy')) {
+      parts.push(`${GRAY}[monthly]${R}`);
+    } else if (snap.limitType === 'daily' && !snap.tool.includes('agy')) {
+      parts.push(`${GRAY}[daily]${R}`);
     }
   }
 
@@ -139,6 +150,10 @@ export function formatRow(snap: UsageSnapshot, padWidth = 13): string {
     }
   }
 
+  if (snap.isFreeTier) {
+    parts.push(`${GRAY}[free]${R}`);
+  }
+
   if (isEstimate(snap)) {
     parts.push(`${GRAY}[~est]${R}`);
   }
@@ -149,6 +164,8 @@ export function formatRow(snap: UsageSnapshot, padWidth = 13): string {
 
   if (snap.weeklyLimitReached) {
     parts.push(`${RED}⚠️ weekly limit${R}`);
+  } else if (snap.monthlyLimitReached) {
+    parts.push(`${RED}⚠️ monthly limit${R}`);
   }
 
   const detailStr = parts.length > 0 ? ` ${parts.join(' ')}` : '';

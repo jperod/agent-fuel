@@ -210,7 +210,7 @@ function loadPackageVersion(): string {
     const pkg = JSON.parse(fs.readFileSync(path.join(dir, '../package.json'), 'utf8'));
     return pkg.version;
   } catch {
-    return '0.9.1';
+    return '0.9.2';
   }
 }
 

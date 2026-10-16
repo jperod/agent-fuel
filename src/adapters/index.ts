@@ -6,11 +6,15 @@ export interface UsageSnapshot {
   resetAt?: string | null;
   source: 'official-cli' | 'ccusage' | 'local-state' | 'provider-api' | 'cache' | 'unknown';
   isLoading?: boolean;
+  isFreeTier?: boolean;
   weeklyLimitReached?: boolean;
-  limitType?: 'session' | 'weekly';
+  monthlyLimitReached?: boolean;
+  limitType?: 'session' | 'weekly' | 'monthly' | 'daily' | string;
   breakdown?: {
-    fiveHour: number | null;
-    weekly: number | null;
+    fiveHour?: number | null;
+    weekly?: number | null;
+    monthly?: number | null;
+    daily?: number | null;
   };
   raw?: unknown;
 }

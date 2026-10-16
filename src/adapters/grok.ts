@@ -309,12 +309,14 @@ export class GrokQuotaAdapter implements QuotaAdapter {
       const result = parseGrokOutput(raw);
 
       if (result.remainingPercent !== null) {
+        const isFreeTier = /Free plan|\(Free\)/i.test(raw);
         const snapshot: UsageSnapshot = {
           tool: toolId,
           displayName,
           remainingPercent: result.remainingPercent,
           usedPercent: result.usedPercent,
           resetAt: result.resetAt,
+          isFreeTier,
           source: 'official-cli',
           breakdown: (result.sessionRemainingPct != null || result.weeklyRemainingPct != null) ? {
             fiveHour: result.sessionRemainingPct ?? null,

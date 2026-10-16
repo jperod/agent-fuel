@@ -1,7 +1,28 @@
 import { execFileSync } from 'node:child_process';
-import { unlinkSync } from 'node:fs';
+import fs, { unlinkSync } from 'node:fs';
 import crypto from 'node:crypto';
+import os from 'node:os';
+import path from 'node:path';
 import { debug } from './debug.js';
+
+function ensureSafeTmuxDir(): void {
+  if (process.env.TMUX_TMPDIR) return;
+  try {
+    const uid = typeof process.getuid === 'function' ? process.getuid() : 1000;
+    const dir = path.join(os.tmpdir(), `af-tmux-${uid}`);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { mode: 0o700, recursive: true });
+    }
+    try {
+      fs.chmodSync(dir, 0o700);
+    } catch {
+      // ignore
+    }
+    process.env.TMUX_TMPDIR = dir;
+  } catch {
+    // ignore
+  }
+}
 
 // Global registries for active resources
 const activeScrapers = new Set<TuiScraper>();
@@ -64,9 +85,6 @@ function registerSignalHandlers(): void {
 }
 registerSignalHandlers(); // called at import time — guarded by signalsRegistered flag
 
-import os from 'node:os';
-import path from 'node:path';
-
 function expandTilde(p: string): string {
   if (p.startsWith('~/') || p === '~') {
     return path.join(os.homedir(), p.slice(1));
@@ -97,6 +115,7 @@ export class TuiScraper {
   }
 
   start(): void {
+    ensureSafeTmuxDir();
     try {
       execFileSync('which', ['tmux'], { stdio: 'ignore', timeout: 5000 });
     } catch {

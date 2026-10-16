@@ -155,6 +155,7 @@ async function runCodexScrape(cmd = 'codex', env?: Record<string, string>, retry
     const retryAt = Date.now() + 2_500;
     while (Date.now() < deadline) {
       const rendered = tui.capture(100);
+      debug('codex:scrape', 'current rendered screen', rendered);
       if (/incompatible feature settings|Run without daemon/i.test(rendered)) {
         debug('codex:scrape', 'Incompatible feature settings dialog appeared during status loop — sending "1"');
         tui.send('1');
@@ -163,7 +164,7 @@ async function runCodexScrape(cmd = 'codex', env?: Record<string, string>, retry
         continue;
       }
       const parsed = parseScrapeOutput(rendered);
-      if (parsed.quotaReached || parsed.fiveHourRemainingPct !== null || parsed.weeklyRemainingPct != null) {
+      if (parsed.quotaReached || (parsed.limits && parsed.limits.length > 0) || parsed.fiveHourRemainingPct !== null || parsed.weeklyRemainingPct != null || parsed.monthlyRemainingPct != null) {
         return rendered;
       }
       // If /status is still unsubmitted on the input prompt, hit Enter again
@@ -177,6 +178,8 @@ async function runCodexScrape(cmd = 'codex', env?: Record<string, string>, retry
       }
       await sleep(300);
     }
+    const finalScreen = tui.capture(100);
+    debug('codex:scrape', 'final screen before timeout', finalScreen);
     throw new Error('Codex /status did not show quota data within 15 seconds');
 
   } finally {
@@ -186,13 +189,26 @@ async function runCodexScrape(cmd = 'codex', env?: Record<string, string>, retry
 
 // ── Output parser ──────────────────────────────────────────────────────────
 
+export interface CodexLimit {
+  name: string;
+  type: 'session' | 'weekly' | 'monthly' | 'daily';
+  pct: number;
+  resetAt: string | null;
+}
+
 interface CodexScrapeResult {
   quotaReached: boolean;
   resetIn: string | null;
+  limits: CodexLimit[];
+  isFreeTier: boolean;
   fiveHourRemainingPct: number | null;
   fiveHourResetAt: string | null;
   weeklyRemainingPct?: number | null;
   weeklyResetAt?: string | null;
+  monthlyRemainingPct?: number | null;
+  monthlyResetAt?: string | null;
+  dailyRemainingPct?: number | null;
+  dailyResetAt?: string | null;
 }
 
 function stripAnsi(str: string): string {
@@ -203,68 +219,164 @@ function stripAnsi(str: string): string {
     .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '');
 }
 
-function parseScrapeOutput(raw: string): CodexScrapeResult {
+export function parseScrapeOutput(raw: string): CodexScrapeResult {
   // Keep this compatible with both rendered tmux text and older ANSI output.
   const clean = stripAnsi(raw);
 
+  const isFreeTier =
+    /\((?:Free|Free Tier)\)/i.test(clean) ||
+    /Account:\s*.*?\bFree\b/i.test(clean) ||
+    /Plan:\s*.*?\bFree\b/i.test(clean) ||
+    /for a limited time.*?for free/i.test(clean);
+
   // "Individual quota reached. Contact your administrator to enable overages. Resets in 4h33m29s."
-  if (/Individual quota reached|You(?:'ve| have) reached your usage limit|Rate limit reached/i.test(clean)) {
-    const resetMatch = clean.match(/Resets in\s*((?:\d+h)?(?:\d+m)?(?:\d+s)?)/i);
+  if (/(?:Individual\s+|Monthly\s+|Weekly\s+)?quota reached|You(?:'ve| have) reached your (?:monthly\s+|weekly\s+|free\s+)?(?:usage\s+)?limit|Rate limit reached/i.test(clean)) {
+    const resetMatch = clean.match(/Resets (?:in\s*)?((?:\d+h)?\s*(?:\d+m)?(?:\d+s)?|[^\n\r)]+)/i);
     let resetIn: string | null = null;
     if (resetMatch) {
-      const parts: string[] = [];
-      const hm = resetMatch[1].match(/^(\d+h)?(\d+m)?/);
-      if (hm) {
+      const val = resetMatch[1].trim();
+      const hm = val.match(/^(\d+h)?\s*(\d+m)?/);
+      if (hm && (hm[1] || hm[2])) {
+        const parts: string[] = [];
         if (hm[1]) parts.push(hm[1]);
         if (hm[2]) parts.push(hm[2]);
+        resetIn = parts.join(' ');
+      } else {
+        resetIn = val;
       }
-      resetIn = parts.length > 0 ? parts.join(' ') : null;
     }
-    debug('codex:parse', 'result', { quotaReached: true, resetIn });
-    return { quotaReached: true, resetIn, fiveHourRemainingPct: null, fiveHourResetAt: null };
-  }
-
-  // Parse "/status" panel: "5h limit: [...] X% left (resets HH:MM)"
-  // Use the LAST match — /status is sent twice and the second response is fresh.
-  const allFiveHMatches = [...clean.matchAll(/5h limit:\s*(?:\[.*?\]\s*)?(\d+)%\s*left(?:\s*\(resets\s+([^)]+)\))?/gi)];
-  const fiveHMatch = allFiveHMatches.at(-1) ?? null;
-  
-  const allWeeklyMatches = [...clean.matchAll(/weekly limit:\s*(?:\[.*?\]\s*)?(\d+)%\s*left(?:\s*\(resets\s+([^)]+)\))?/gi)];
-  const weeklyMatch = allWeeklyMatches.at(-1) ?? null;
-
-  if (fiveHMatch || weeklyMatch) {
-    const fiveHourRemainingPct = fiveHMatch ? Math.min(100, Math.max(0, parseInt(fiveHMatch[1], 10))) : null;
-    const fiveHourResetAt = fiveHMatch && fiveHMatch[2] ? fiveHMatch[2].trim() : null;
-    const weeklyRemainingPct = weeklyMatch ? Math.min(100, Math.max(0, parseInt(weeklyMatch[1], 10))) : null;
-    const weeklyResetAt = weeklyMatch && weeklyMatch[2] ? weeklyMatch[2].trim() : null;
-    
-    debug('codex:parse', 'result', {
-      quotaReached: false,
-      fiveHourRemainingPct,
-      fiveHourResetAt,
-      weeklyRemainingPct,
-      weeklyResetAt,
-    });
+    debug('codex:parse', 'result', { quotaReached: true, resetIn, isFreeTier });
     return {
-      quotaReached: false,
-      resetIn: null,
-      fiveHourRemainingPct,
-      fiveHourResetAt,
-      weeklyRemainingPct,
-      weeklyResetAt,
+      quotaReached: true,
+      resetIn,
+      limits: [{ name: 'quota', type: 'session', pct: 0, resetAt: resetIn }],
+      isFreeTier,
+      fiveHourRemainingPct: null,
+      fiveHourResetAt: null,
+      weeklyRemainingPct: null,
+      weeklyResetAt: null,
+      monthlyRemainingPct: null,
+      monthlyResetAt: null,
+      dailyRemainingPct: null,
+      dailyResetAt: null,
     };
   }
 
-  // "⚠ Heads up, you have less than X% of your 5h limit left."
-  const headsUpMatch = clean.match(/less than (\d+)%\s+of your 5h limit left/i);
-  if (headsUpMatch) {
-    const ceiling = parseInt(headsUpMatch[1], 10);
-    const fiveHourRemainingPct = Math.max(0, ceiling - 1);
-    debug('codex:parse', 'result', { source: 'headsUp', ceiling, fiveHourRemainingPct });
-    return { quotaReached: false, resetIn: null, fiveHourRemainingPct, fiveHourResetAt: null };
+  // Parse "/status" panel lines like:
+  //   "5h limit:       [██████████░░░░░░░░░░] 52% left (resets 23:37)"
+  //   "Weekly limit:   [████░░░░░░░░░░░░░░░░] 21% left (resets 10:53 on 31 May)"
+  //   "Monthly limit:  [░░░░░░░░░░░░░░░░░░░░]  0% left (resets 17:14 on 14 Nov)"
+  //   "Daily limit:    [...] 80% left"
+  // Keep the LAST occurrence of each limit type since /status may be sent twice.
+  const allLimitMatches = [
+    ...clean.matchAll(/(?:^|[\r\n])[^\S\r\n]*([a-zA-Z0-9_-]+(?:\s+[a-zA-Z0-9_-]+)?)\s*limit:\s*(?:\[.*?\]\s*)?(\d+)\s*%\s*(?:left|remaining)(?:\s*\(resets\s+([^)]+)\))?/gi),
+  ];
+
+  if (allLimitMatches.length > 0) {
+    const limitsByType = new Map<string, CodexLimit>();
+
+    for (const match of allLimitMatches) {
+      const rawName = match[1].trim().toLowerCase();
+      const pct = Math.min(100, Math.max(0, parseInt(match[2], 10)));
+      const resetAt = match[3] ? match[3].trim() : null;
+
+      let type: 'session' | 'weekly' | 'monthly' | 'daily' = 'session';
+      if (/5h|session|hour/i.test(rawName)) {
+        type = 'session';
+      } else if (/week/i.test(rawName)) {
+        type = 'weekly';
+      } else if (/month/i.test(rawName)) {
+        type = 'monthly';
+      } else if (/day|daily/i.test(rawName)) {
+        type = 'daily';
+      }
+
+      limitsByType.set(type, {
+        name: rawName,
+        type,
+        pct,
+        resetAt,
+      });
+    }
+
+    const limits = Array.from(limitsByType.values());
+    const fiveHourLimit = limitsByType.get('session');
+    const weeklyLimit = limitsByType.get('weekly');
+    const monthlyLimit = limitsByType.get('monthly');
+    const dailyLimit = limitsByType.get('daily');
+
+    debug('codex:parse', 'result', {
+      quotaReached: false,
+      limits,
+      fiveHourRemainingPct: fiveHourLimit?.pct ?? null,
+      fiveHourResetAt: fiveHourLimit?.resetAt ?? null,
+      weeklyRemainingPct: weeklyLimit?.pct ?? null,
+      weeklyResetAt: weeklyLimit?.resetAt ?? null,
+      monthlyRemainingPct: monthlyLimit?.pct ?? null,
+      monthlyResetAt: monthlyLimit?.resetAt ?? null,
+      dailyRemainingPct: dailyLimit?.pct ?? null,
+      dailyResetAt: dailyLimit?.resetAt ?? null,
+    });
+
+    return {
+      quotaReached: false,
+      resetIn: null,
+      limits,
+      isFreeTier,
+      fiveHourRemainingPct: fiveHourLimit?.pct ?? null,
+      fiveHourResetAt: fiveHourLimit?.resetAt ?? null,
+      weeklyRemainingPct: weeklyLimit?.pct ?? null,
+      weeklyResetAt: weeklyLimit?.resetAt ?? null,
+      monthlyRemainingPct: monthlyLimit?.pct ?? null,
+      monthlyResetAt: monthlyLimit?.resetAt ?? null,
+      dailyRemainingPct: dailyLimit?.pct ?? null,
+      dailyResetAt: dailyLimit?.resetAt ?? null,
+    };
   }
 
-  return { quotaReached: false, resetIn: null, fiveHourRemainingPct: null, fiveHourResetAt: null };
+  // "⚠ Heads up, you have less than X% of your 5h/weekly/monthly limit left."
+  const headsUpMatch = clean.match(/less than (\d+)%\s+of your (?:([a-z0-9_-]+)\s+)?limit left/i);
+  if (headsUpMatch) {
+    const ceiling = parseInt(headsUpMatch[1], 10);
+    const remainingPct = Math.max(0, ceiling - 1);
+    const limitName = headsUpMatch[2] ? headsUpMatch[2].toLowerCase() : '5h';
+    let type: 'session' | 'weekly' | 'monthly' | 'daily' = 'session';
+    if (/week/i.test(limitName)) type = 'weekly';
+    else if (/month/i.test(limitName)) type = 'monthly';
+    else if (/day|daily/i.test(limitName)) type = 'daily';
+
+    const limit: CodexLimit = { name: limitName, type, pct: remainingPct, resetAt: null };
+    debug('codex:parse', 'result', { source: 'headsUp', ceiling, remainingPct, type });
+    return {
+      quotaReached: false,
+      resetIn: null,
+      limits: [limit],
+      isFreeTier,
+      fiveHourRemainingPct: type === 'session' ? remainingPct : null,
+      fiveHourResetAt: null,
+      weeklyRemainingPct: type === 'weekly' ? remainingPct : null,
+      weeklyResetAt: null,
+      monthlyRemainingPct: type === 'monthly' ? remainingPct : null,
+      monthlyResetAt: null,
+      dailyRemainingPct: type === 'daily' ? remainingPct : null,
+      dailyResetAt: null,
+    };
+  }
+
+  return {
+    quotaReached: false,
+    resetIn: null,
+    limits: [],
+    isFreeTier,
+    fiveHourRemainingPct: null,
+    fiveHourResetAt: null,
+    weeklyRemainingPct: null,
+    weeklyResetAt: null,
+    monthlyRemainingPct: null,
+    monthlyResetAt: null,
+    dailyRemainingPct: null,
+    dailyResetAt: null,
+  };
 }
 
 // ── ccusage fallback estimate ──────────────────────────────────────────────
@@ -392,27 +504,36 @@ export class CodexQuotaAdapter implements QuotaAdapter {
           remainingPercent: 0,
           usedPercent: 100,
           resetAt,
+          isFreeTier: result.isFreeTier,
+          monthlyLimitReached: result.isFreeTier,
           source: 'official-cli',
         };
         await saveOfficial(snapshot, this.account);
         return snapshot;
       }
 
-      const limits: { pct: number; reset: string | null; type: 'session' | 'weekly' }[] = [];
-      if (result.fiveHourRemainingPct !== null) {
-        limits.push({ pct: result.fiveHourRemainingPct, reset: result.fiveHourResetAt, type: 'session' });
-      }
-      if (result.weeklyRemainingPct !== undefined && result.weeklyRemainingPct !== null) {
-        limits.push({ pct: result.weeklyRemainingPct, reset: result.weeklyResetAt ?? null, type: 'weekly' });
-      }
-
-      if (limits.length > 0) {
-        limits.sort((a, b) => a.pct - b.pct);
-        const limiting = limits[0];
+      if (result.limits.length > 0) {
+        // Sort limits ascending by remaining percentage so that the most constraining limit is primary
+        const sortedLimits = [...result.limits].sort((a, b) => a.pct - b.pct);
+        const limiting = sortedLimits[0];
 
         const remainingPercent = limiting.pct;
-        const resetAt = limiting.reset;
-        const weeklyLimitReached = result.weeklyRemainingPct === 0;
+        const resetAt = limiting.resetAt;
+        const weeklyLimitReached = result.limits.some(l => l.type === 'weekly' && l.pct === 0);
+        const monthlyLimitReached = result.limits.some(l => l.type === 'monthly' && l.pct === 0);
+
+        const fiveHour = result.limits.find(l => l.type === 'session')?.pct ?? null;
+        const weekly = result.limits.find(l => l.type === 'weekly')?.pct ?? null;
+        const monthly = result.limits.find(l => l.type === 'monthly')?.pct ?? null;
+
+        let breakdown: UsageSnapshot['breakdown'] = undefined;
+        if (fiveHour !== null && weekly !== null) {
+          breakdown = { fiveHour, weekly };
+        } else if (fiveHour !== null && monthly !== null) {
+          breakdown = { fiveHour, monthly };
+        } else if (weekly !== null && monthly !== null) {
+          breakdown = { weekly, monthly };
+        }
 
         debug('codex:fetch', `parsed /status → ${remainingPercent}% remaining (limiting factor: ${limiting.type})`);
         const snapshot: UsageSnapshot = {
@@ -422,11 +543,10 @@ export class CodexQuotaAdapter implements QuotaAdapter {
           usedPercent: 100 - remainingPercent,
           resetAt,
           limitType: limiting.type,
-          breakdown: (result.fiveHourRemainingPct !== null && result.weeklyRemainingPct !== undefined && result.weeklyRemainingPct !== null) ? {
-            fiveHour: result.fiveHourRemainingPct,
-            weekly: result.weeklyRemainingPct,
-          } : undefined,
+          breakdown,
+          isFreeTier: result.isFreeTier,
           weeklyLimitReached,
+          monthlyLimitReached,
           source: 'official-cli',
         };
         await saveOfficial(snapshot, this.account);
