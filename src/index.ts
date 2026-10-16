@@ -5,6 +5,7 @@ import { ClaudeQuotaAdapter } from './adapters/claude.js';
 import { CodexQuotaAdapter } from './adapters/codex.js';
 import { AgyQuotaAdapter } from './adapters/agy.js';
 import { GrokQuotaAdapter } from './adapters/grok.js';
+import { CursorQuotaAdapter } from './adapters/cursor.js';
 import { QuotaAdapter, UsageSnapshot } from './adapters/index.js';
 import { printHeader, printFooter, formatRow, getDisplayName, SHADE_CHAR } from './render.js';
 import { loadConfig, handleConfigCommand, AccountConfig } from './config.js';
@@ -27,7 +28,7 @@ const config = loadConfig();
 
 // Build dynamic slot order & weight mapping
 function buildSlotInfo(accounts: AccountConfig[]) {
-  const typePriority: Record<string, number> = { claude: 1, codex: 2, agy: 3, grok: 4 };
+  const typePriority: Record<string, number> = { claude: 1, codex: 2, cursor: 3, agy: 4, grok: 5 };
   const sortedAccounts = [...accounts].sort((a, b) => {
     const pA = typePriority[a.type] ?? 99;
     const pB = typePriority[b.type] ?? 99;
@@ -184,7 +185,7 @@ function loadPackageVersion(): string {
     const pkg = JSON.parse(fs.readFileSync(path.join(dir, '../package.json'), 'utf8'));
     return pkg.version;
   } catch {
-    return '0.8.1';
+    return '0.9.0';
   }
 }
 
@@ -209,6 +210,7 @@ async function main(): Promise<void> {
       case 'codex':  return new CodexQuotaAdapter(acc);
       case 'agy':    return new AgyQuotaAdapter(acc);
       case 'grok':   return new GrokQuotaAdapter(acc);
+      case 'cursor': return new CursorQuotaAdapter(acc);
       default:       return new ClaudeQuotaAdapter(acc);
     }
   });
