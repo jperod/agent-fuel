@@ -90,7 +90,7 @@ agent-fuel/
   │       ├── claude.ts       # Claude Code (multi-account TUI scrape & prompt handler)
   │       ├── codex.ts        # Codex CLI (expect TUI scrape; ccusage fallback)
   │       ├── cursor.ts       # Cursor Agent (direct Connect API query; TUI scrape fallback)
-  │       ├── agy.ts          # AGY — split into Gemini + Other buckets per account
+  │       ├── agy.ts          # AGY — split into Gemini, Other, and Argon buckets per account
   │       └── grok.ts         # Grok Build (xAI / SpaceXAI TUI scrape & session limits)
   ├── package.json
   └── README.md
@@ -132,17 +132,18 @@ type UsageSnapshot = {
 ```
 ⚡️ Agent Fuel - CLI Quota Monitor
 
-Claude Code     [███░░░░░░░░░░░░░░░░░░░░░░░░░░░]   9% remaining (5h: 100% | wk: 9%) (resets Aug 1 at 05:59 (Europe/Copenhagen))
-Claude Personal [████████░░░░░░░░░░░░░░░░░░░░░░]  25% remaining (5h: 96% | wk: 25%) (resets Aug 2 at 14:59 (Europe/Copenhagen))
-Codex           [███░░░░░░░░░░░░░░░░░░░░░░░░░░░]  11% remaining [weekly] (resets 09:10 on 5 Aug)
-Cursor Agent    [██████████████████████████████] 100% remaining [weekly] (resets Oct 23)
-AGY Gemini      [█████████████████░░░░░░░░░░░░░]  56% remaining (5h: 92% | wk: 56%) (resets in 95h 16m) [GEMINI MODELS]
-AGY Other       [██████████████████████████████] 100% remaining (5h: 100% | wk: 100%) ✓ quota available [CLAUDE AND GPT MODELS]
-Grok Build      [█████████████████████░░░░░░░░░]  70% remaining (5h: 85% | wk: 70%) (resets in 18h)
+Claude Code       [███░░░░░░░░░░░░░░░░░░░░░░░░░░░]   9% remaining (5h: 100% | wk: 9%) (resets Aug 1 at 05:59 (Europe/Copenhagen))
+Claude Personal   [████████░░░░░░░░░░░░░░░░░░░░░░]  25% remaining (5h: 96% | wk: 25%) (resets Aug 2 at 14:59 (Europe/Copenhagen))
+Codex             [███░░░░░░░░░░░░░░░░░░░░░░░░░░░]  11% remaining [weekly] (resets 09:10 on 5 Aug)
+Cursor Agent      [██████████████████████████████] 100% remaining [weekly] (resets Oct 23)
+AGY ╭ Flash & Pro [█████████████████░░░░░░░░░░░░░]  56% remaining (5h: 92% | wk: 56%) (resets in 95h 16m) [GEMINI MODELS]
+    │ Argon       [░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░]   0% remaining (wk: 0%) (resets in 165h 46m) [GEMINI 4 ARGON] ⚠️ weekly limit
+    ╰ Other       [██████████████████████████████] 100% remaining (5h: 100% | wk: 100%) ✓ quota available [CLAUDE AND GPT MODELS]
+Grok Build        [█████████████████████░░░░░░░░░]  70% remaining (5h: 85% | wk: 70%) (resets in 18h)
 
-Total           [████████░░░░░░░░░░░░░░░░░░░░░░]  34% remaining  (tune weights: agent-fuel config)
+Total             [████████░░░░░░░░░░░░░░░░░░░░░░]  34% remaining  (tune weights: agent-fuel config)
 
-agent-fuel v0.9.0 • Last refreshed at: 11:44
+agent-fuel v0.9.1 • Last refreshed at: 11:44
 ```
 
 - **Total** bar prints on top showing the weighted consolidated remaining quota across all configured accounts.
@@ -271,8 +272,9 @@ Environment variables take highest precedence and override any values saved in t
 | `AGENT_FUEL_WEIGHT_CLAUDE`     | `20`    | Weight size ratio of the Claude Code quota pool                |
 | `AGENT_FUEL_WEIGHT_CODEX`      | `20`    | Weight size ratio of the Codex quota pool                      |
 | `AGENT_FUEL_WEIGHT_CURSOR`     | `20`    | Weight size ratio of the Cursor Agent quota pool               |
-| `AGENT_FUEL_WEIGHT_AGY_GEMINI` | `10`    | Weight size ratio of the AGY Gemini quota pool                 |
-| `AGENT_FUEL_WEIGHT_AGY_OTHER`  | `10`    | Weight size ratio of the AGY Other quota pool                  |
+| `AGENT_FUEL_WEIGHT_AGY_GEMINI` | `10`    | Weight size ratio of the AGY Flash & Pro quota pool            |
+| `AGENT_FUEL_WEIGHT_AGY_ARGON`  | `2`     | Weight size ratio of the AGY Argon quota pool                  |
+| `AGENT_FUEL_WEIGHT_AGY_OTHER`  | `2`     | Weight size ratio of the AGY Other (Claude/GPT) quota pool     |
 | `AGENT_FUEL_WEIGHT_GROK`       | `20`    | Weight size ratio of the Grok Build quota pool                 |
 | `AGENT_FUEL_SHOW_TOTAL`        | `true`  | Show or hide the consolidated Total quota bar (`true`/`false`) |
 | `CURSOR_API_KEY`               | —       | Direct authentication key for Cursor Connect API query         |
