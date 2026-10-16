@@ -33,6 +33,7 @@ export function getDisplayName(input: string | UsageSnapshot): string {
     case 'agy-gemini':  return 'AGY Gemini';
     case 'agy-other':   return 'AGY Other';
     case 'grok':        return 'Grok Build';
+    case 'cursor':      return 'Cursor Agent';
     case 'total':       return 'Total';
     default:            return input;
   }
@@ -102,8 +103,10 @@ export function formatRow(snap: UsageSnapshot, padWidth = 13): string {
 
   const parts: string[] = [];
 
-  if (snap.breakdown) {
+  if (snap.breakdown && typeof snap.breakdown.fiveHour === 'number' && typeof snap.breakdown.weekly === 'number') {
     parts.push(`${GRAY}(5h: ${snap.breakdown.fiveHour}% | wk: ${snap.breakdown.weekly}%)${R}`);
+  } else if (snap.breakdown && typeof snap.breakdown.weekly === 'number') {
+    parts.push(`${GRAY}(wk: ${snap.breakdown.weekly}%)${R}`);
   } else {
     if (snap.limitType === 'weekly' && !snap.tool.includes('agy')) {
       parts.push(`${GRAY}[weekly]${R}`);
