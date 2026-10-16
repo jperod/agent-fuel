@@ -12,6 +12,7 @@ const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const STALE_CACHE_MAX_MS = 30 * 60 * 1000;
 
 interface ModelQuotaEntry {
+  group?: string;
   model: string;
   percent: number;
   refreshLine: string | null;
@@ -22,9 +23,58 @@ interface QuotaCache {
   entries: ModelQuotaEntry[];
 }
 
-function hasBothGroups(entries: ModelQuotaEntry[]): boolean {
-  return entries.some(e => /gemini/i.test(e.model)) &&
-    entries.some(e => !/gemini/i.test(e.model));
+export function isArgonEntry(e: ModelQuotaEntry): boolean {
+  const g = e.group || '';
+  const m = e.model || '';
+  return /argon/i.test(g) || /argon/i.test(m);
+}
+
+export function isOtherEntry(e: ModelQuotaEntry): boolean {
+  if (isArgonEntry(e)) return false;
+  const g = e.group || '';
+  const m = e.model || '';
+  if (g) {
+    return /claude|gpt|other/i.test(g);
+  }
+  return /claude|opus|sonnet|gpt/i.test(m) || !/gemini/i.test(m);
+}
+
+export function isCoreGeminiEntry(e: ModelQuotaEntry): boolean {
+  if (isArgonEntry(e)) return false;
+  if (isOtherEntry(e)) return false;
+  const g = e.group || '';
+  if (g && !/^gemini(\s+models)?$/i.test(g)) return false;
+  return true;
+}
+
+function hasGroups(entries: ModelQuotaEntry[]): boolean {
+  return entries.some(e => isCoreGeminiEntry(e)) &&
+    entries.some(e => isOtherEntry(e));
+}
+
+function isGroupHeader(line: string, nextLine: string): boolean {
+  if (
+    line.startsWith('Account:') ||
+    line.startsWith('│') ||
+    line.startsWith('─') ||
+    line.startsWith('┌') ||
+    line.startsWith('└') ||
+    line.startsWith('┘') ||
+    line.startsWith('?') ||
+    line.startsWith('esc') ||
+    line.startsWith('[')
+  ) {
+    return false;
+  }
+  if (nextLine.startsWith('Models within this group:')) {
+    return true;
+  }
+  if (/^[A-Z0-9\s/&+-]{3,}$/.test(line) && /[A-Z]/.test(line)) {
+    if (/^(DISABLED|WARNING|ERROR|NOTE|REMAINING)$/i.test(line)) return false;
+    if (/REFRESH|LIMIT REMAINING|QUOTA AVAILABLE/i.test(line)) return false;
+    return true;
+  }
+  return false;
 }
 
 // ── Scraping ───────────────────────────────────────────────────────────────
@@ -51,22 +101,33 @@ async function runAgyUsage(cmd = 'agy', env?: Record<string, string>): Promise<s
     tui.send('/usage');
     await tui.waitFor(/Models?\s*(?:&\s*)?Quota/i, 10_000);
 
-    // The heading appears before the quota rows. Wait until both groups and
-    // their five-hour and weekly limits have actually rendered.
+    // The heading appears before the quota rows. Wait until the groups have rendered.
     const deadline = Date.now() + 10_000;
     let lastScreen = '';
     while (Date.now() < deadline) {
       lastScreen = tui.capture();
       const entries = parseQuotaPanel(lastScreen);
-      const gemini = entries.filter(e => /gemini/i.test(e.model));
-      const other = entries.filter(e => !/gemini/i.test(e.model));
-      const complete = [gemini, other].every(group =>
-        group.some(e => /weekly/i.test(e.model)) &&
-        group.some(e => /five\s*hour|5\s*h/i.test(e.model)));
-      if (complete) return lastScreen;
-      await sleep(300);
+      const gemini = entries.filter(e => isCoreGeminiEntry(e));
+      const other = entries.filter(e => isOtherEntry(e));
+
+      // The footer note 'Within each group' is the very last element drawn in the panel
+      if (lastScreen.includes('Within each group') && gemini.length > 0 && other.length > 0) {
+        return lastScreen;
+      }
+
+      const complete = gemini.length > 0 && other.length > 0 &&
+        gemini.some(e => /weekly/i.test(e.model)) &&
+        other.some(e => /weekly/i.test(e.model));
+      const hasArgon = /argon/i.test(lastScreen);
+      if (complete && hasArgon) {
+        const argon = entries.filter(e => isArgonEntry(e));
+        if (argon.length > 0) return lastScreen;
+      } else if (complete && !hasArgon) {
+        return lastScreen;
+      }
+      await sleep(200);
     }
-    debug('agy:scrape', 'quota panel incomplete after 10 seconds', parseQuotaPanel(lastScreen));
+    debug('agy:scrape', 'quota panel scrape completed or deadline reached', parseQuotaPanel(lastScreen));
     return lastScreen;
 
   } finally {
@@ -76,7 +137,7 @@ async function runAgyUsage(cmd = 'agy', env?: Record<string, string>): Promise<s
 
 // ── Parsing ────────────────────────────────────────────────────────────────
 
-function parseQuotaPanel(raw: string): ModelQuotaEntry[] {
+export function parseQuotaPanel(raw: string): ModelQuotaEntry[] {
   const lines = raw.split(/\r?\n/);
   const results: ModelQuotaEntry[] = [];
 
@@ -95,16 +156,33 @@ function parseQuotaPanel(raw: string): ModelQuotaEntry[] {
       continue;
     }
 
-    // Check if we hit a group header in the new layout
     const nextLine = panelLines[i + 1]?.trim() || '';
-    if (nextLine.startsWith('Models within this group:')) {
+
+    // Check if we hit a group header
+    if (isGroupHeader(line, nextLine)) {
       currentGroup = line;
-      i += 2; // Skip the group header and the "Models within this group" lines
+      if (nextLine.startsWith('Models within this group:')) {
+        i += 2;
+      } else {
+        i += 1;
+      }
+      continue;
+    }
+
+    // Skip description and footer lines
+    if (
+      line.startsWith('Models within this group:') ||
+      line.startsWith('For paid') ||
+      line.startsWith('Within each group') ||
+      line.startsWith('│')
+    ) {
+      i++;
       continue;
     }
 
     const isModelName =
       line.length > 0 &&
+      !line.startsWith('Account:') &&
       !line.startsWith('░') && !line.startsWith('█') &&
       !line.startsWith('[') &&
       !line.startsWith('│') &&
@@ -123,6 +201,13 @@ function parseQuotaPanel(raw: string): ModelQuotaEntry[] {
       while (j < panelLines.length) {
         const candidate = panelLines[j].trim();
         if (candidate.length === 0) { j++; continue; }
+
+        if (barLine === null && candidate.startsWith('Disabled:')) {
+          barLine = '0%';
+          refreshLine = candidate;
+          j++;
+          break;
+        }
 
         if (barLine === null && (candidate.includes('░') || candidate.includes('█') || /^\d+%/.test(candidate) || /\[.*\]/.test(candidate) || /[\d.]+%/.test(candidate))) {
           barLine = candidate;
@@ -144,7 +229,7 @@ function parseQuotaPanel(raw: string): ModelQuotaEntry[] {
         if (percentMatch) {
           const percent = Math.round(parseFloat(percentMatch[1]));
           const name = currentGroup ? `${currentGroup} - ${line}` : line;
-          results.push({ model: name, percent, refreshLine });
+          results.push({ group: currentGroup || undefined, model: name, percent, refreshLine });
         }
       }
 
@@ -164,7 +249,7 @@ async function readCache(accountKey = 'default'): Promise<QuotaCache | null> {
   try {
     const cache = JSON.parse(await fs.readFile(cacheFile, 'utf-8')) as QuotaCache;
     if (!Number.isFinite(cache.fetchedAt) || !Array.isArray(cache.entries) ||
-        !hasBothGroups(cache.entries) || Date.now() - cache.fetchedAt > STALE_CACHE_MAX_MS) return null;
+        !hasGroups(cache.entries) || Date.now() - cache.fetchedAt > STALE_CACHE_MAX_MS) return null;
     return cache;
   } catch { return null; }
 }
@@ -178,7 +263,7 @@ async function writeCache(entries: ModelQuotaEntry[], accountKey = 'default'): P
 
 // ── Bucket aggregation ────────────────────────────────────────────────────
 
-function buildSnapshots(
+export function buildSnapshots(
   entries: ModelQuotaEntry[],
   fromCache: boolean,
   account?: AccountConfig,
@@ -186,17 +271,23 @@ function buildSnapshots(
   const source = fromCache ? 'cache' : 'official-cli';
   const baseId = account?.id || 'agy';
   const baseName = account?.displayName || 'AGY';
+  const prefix = baseName.replace(/\s+(Gemini|Argon|Other)$/i, '');
+  const indent = ' '.repeat(prefix.length);
 
   const geminiToolId = `${baseId}-gemini`;
+  const argonToolId = `${baseId}-argon`;
   const otherToolId = `${baseId}-other`;
 
-  const geminiName = baseName.includes('Gemini') ? baseName : `${baseName} Gemini`;
-  const otherName = baseName.includes('Other') ? baseName : `${baseName} Other`;
+  const geminiEntries = entries.filter(e => isCoreGeminiEntry(e));
+  const argonEntries  = entries.filter(e => isArgonEntry(e));
+  const otherEntries  = entries.filter(e => isOtherEntry(e));
 
-  const geminiEntries = entries.filter(e => /gemini/i.test(e.model));
-  const otherEntries  = entries.filter(e => !/gemini/i.test(e.model));
-
-  function worstCase(bucket: ModelQuotaEntry[], tool: string, displayName: string): UsageSnapshot {
+  function worstCase(
+    bucket: ModelQuotaEntry[],
+    tool: string,
+    displayName: string,
+    fallbackGroupLabel?: string
+  ): UsageSnapshot {
     if (bucket.length === 0) {
       return { tool, displayName, remainingPercent: null, usedPercent: null, resetAt: null, source: 'unknown' };
     }
@@ -204,25 +295,29 @@ function buildSnapshots(
     const weeklyLimit = bucket.find(e => /weekly/i.test(e.model));
     const fiveHour = bucket.find(e => /five\s*hour|5\s*h/i.test(e.model));
 
-    const limits: { pct: number; reset: string | null; type: 'session' | 'weekly'; model: string }[] = [];
+    const limits: { pct: number; reset: string | null; type: 'session' | 'weekly'; model: string; group?: string }[] = [];
     if (fiveHour) {
-      limits.push({ pct: fiveHour.percent, reset: fiveHour.refreshLine ?? null, type: 'session', model: fiveHour.model });
+      limits.push({ pct: fiveHour.percent, reset: fiveHour.refreshLine ?? null, type: 'session', model: fiveHour.model, group: fiveHour.group });
     }
     if (weeklyLimit) {
-      limits.push({ pct: weeklyLimit.percent, reset: weeklyLimit.refreshLine ?? null, type: 'weekly', model: weeklyLimit.model });
+      limits.push({ pct: weeklyLimit.percent, reset: weeklyLimit.refreshLine ?? null, type: 'weekly', model: weeklyLimit.model, group: weeklyLimit.group });
     }
 
     if (limits.length === 0) {
       const target = bucket.reduce((a, b) => a.percent <= b.percent ? a : b);
-      limits.push({ pct: target.percent, reset: target.refreshLine ?? null, type: 'session', model: target.model });
+      limits.push({ pct: target.percent, reset: target.refreshLine ?? null, type: 'session', model: target.model, group: target.group });
     }
 
     limits.sort((a, b) => a.pct - b.pct);
     const limiting = limits[0];
 
     const remainingPercent = limiting.pct;
-    const resetAt = limiting.reset;
+    let resetAt = limiting.reset;
     const weeklyLimitReached = weeklyLimit ? weeklyLimit.percent === 0 : false;
+    if (weeklyLimitReached && weeklyLimit?.refreshLine && (!resetAt || resetAt.includes('Disabled'))) {
+      resetAt = weeklyLimit.refreshLine;
+    }
+    const groupLabel = limiting.group || fallbackGroupLabel || limiting.model;
 
     return {
       tool,
@@ -231,20 +326,52 @@ function buildSnapshots(
       usedPercent: 100 - remainingPercent,
       resetAt,
       limitType: limiting.type,
-      breakdown: (fiveHour && weeklyLimit) ? {
-        fiveHour: fiveHour.percent,
-        weekly: weeklyLimit.percent,
+      breakdown: (fiveHour || weeklyLimit) ? {
+        fiveHour: fiveHour ? fiveHour.percent : null,
+        weekly: weeklyLimit ? weeklyLimit.percent : null,
       } : undefined,
       weeklyLimitReached,
       source,
-      raw: { matchedModel: limiting.model, allModels: bucket.map(e => `${e.model}: ${e.percent}%`) },
+      raw: { matchedModel: groupLabel, allModels: bucket.map(e => `${e.model}: ${e.percent}%`) },
     };
   }
 
-  return [
-    worstCase(geminiEntries, geminiToolId, geminiName),
-    worstCase(otherEntries,  otherToolId, otherName),
+  // Dynamic future blocks: check for any groups that don't match core Gemini, Other, or Argon
+  const customGroups = new Map<string, ModelQuotaEntry[]>();
+  for (const entry of entries) {
+    if (!isCoreGeminiEntry(entry) && !isOtherEntry(entry) && !isArgonEntry(entry)) {
+      const gName = entry.group || 'Extra';
+      const list = customGroups.get(gName) || [];
+      list.push(entry);
+      customGroups.set(gName, list);
+    }
+  }
+
+  const hasExtra = customGroups.size > 0;
+  const geminiName = `${prefix} ╭ Flash & Pro`;
+  const argonName  = `${indent} │ Argon`;
+  const otherName  = hasExtra ? `${indent} │ Other` : `${indent} ╰ Other`;
+
+  const snapshots: UsageSnapshot[] = [
+    worstCase(geminiEntries, geminiToolId, geminiName, 'GEMINI MODELS'),
+    worstCase(argonEntries,  argonToolId, argonName,  'GEMINI 4 ARGON'),
+    worstCase(otherEntries,  otherToolId, otherName,  'CLAUDE AND GPT MODELS'),
   ];
+
+  let extraIdx = 0;
+  const totalExtra = customGroups.size;
+  for (const [groupName, groupEntries] of customGroups) {
+    extraIdx++;
+    const isLast = extraIdx === totalExtra;
+    const connector = isLast ? '╰' : '│';
+    const slug = groupName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    const toolId = `${baseId}-${slug}`;
+    const cleanTitle = groupName.replace(/\b\w/g, c => c.toUpperCase());
+    const displayName = `${indent} ${connector} ${cleanTitle}`;
+    snapshots.push(worstCase(groupEntries, toolId, displayName, groupName));
+  }
+
+  return snapshots;
 }
 
 // ── Adapter ───────────────────────────────────────────────────────────────
@@ -268,7 +395,7 @@ export class AgyQuotaAdapter implements QuotaAdapter {
       const raw = await runAgyUsage(cmd, env);
       const entries = parseQuotaPanel(raw);
 
-      if (hasBothGroups(entries)) {
+      if (hasGroups(entries)) {
         await writeCache(entries, accountKey);
         return buildSnapshots(entries, false, this.account);
       }
@@ -277,9 +404,12 @@ export class AgyQuotaAdapter implements QuotaAdapter {
 
       const baseId = this.account?.id || 'agy';
       const baseName = this.account?.displayName || 'AGY';
+      const prefix = baseName.replace(/\s+(Gemini|Flash & Pro|Argon|Other)$/i, '');
+      const indent = ' '.repeat(prefix.length);
       return [
-        { tool: `${baseId}-gemini`, displayName: `${baseName} Gemini`, remainingPercent: null, usedPercent: null, resetAt: null, source: 'unknown' },
-        { tool: `${baseId}-other`,  displayName: `${baseName} Other`, remainingPercent: null, usedPercent: null, resetAt: null, source: 'unknown' },
+        { tool: `${baseId}-gemini`, displayName: `${prefix} ╭ Flash & Pro`, remainingPercent: null, usedPercent: null, resetAt: null, source: 'unknown' },
+        { tool: `${baseId}-argon`,  displayName: `${indent} │ Argon`,  remainingPercent: null, usedPercent: null, resetAt: null, source: 'unknown' },
+        { tool: `${baseId}-other`,  displayName: `${indent} ╰ Other`,  remainingPercent: null, usedPercent: null, resetAt: null, source: 'unknown' },
       ];
 
     } catch (error) {
@@ -288,9 +418,12 @@ export class AgyQuotaAdapter implements QuotaAdapter {
       const msg = error instanceof Error ? error.message : String(error);
       const baseId = this.account?.id || 'agy';
       const baseName = this.account?.displayName || 'AGY';
+      const prefix = baseName.replace(/\s+(Gemini|Flash & Pro|Argon|Other)$/i, '');
+      const indent = ' '.repeat(prefix.length);
       return [
-        { tool: `${baseId}-gemini`, displayName: `${baseName} Gemini`, remainingPercent: null, usedPercent: null, resetAt: null, source: 'unknown', raw: msg },
-        { tool: `${baseId}-other`,  displayName: `${baseName} Other`, remainingPercent: null, usedPercent: null, resetAt: null, source: 'unknown', raw: msg },
+        { tool: `${baseId}-gemini`, displayName: `${prefix} ╭ Flash & Pro`, remainingPercent: null, usedPercent: null, resetAt: null, source: 'unknown', raw: msg },
+        { tool: `${baseId}-argon`,  displayName: `${indent} │ Argon`,  remainingPercent: null, usedPercent: null, resetAt: null, source: 'unknown', raw: msg },
+        { tool: `${baseId}-other`,  displayName: `${indent} ╰ Other`,  remainingPercent: null, usedPercent: null, resetAt: null, source: 'unknown', raw: msg },
       ];
     }
   }

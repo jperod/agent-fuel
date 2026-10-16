@@ -11,6 +11,7 @@ export interface AccountConfig {
   command?: string;
   env?: Record<string, string>;
   weight: number;
+  subWeights?: Record<string, number>;
 }
 
 export interface Config {
@@ -88,6 +89,7 @@ export function loadConfig(): Config {
             command: ac.command ? String(ac.command) : undefined,
             env: ac.env && typeof ac.env === 'object' ? ac.env : undefined,
             weight: typeof ac.weight === 'number' && Number.isFinite(ac.weight) && ac.weight >= 0 ? ac.weight : 20,
+            subWeights: ac.subWeights && typeof ac.subWeights === 'object' ? ac.subWeights : undefined,
           }));
         } else if (parsed.weights && typeof parsed.weights === 'object') {
           // Migration path from legacy weights config
@@ -95,6 +97,7 @@ export function loadConfig(): Config {
           const legacyCodex = parsed.weights['codex'] ?? 20;
           const legacyAgyGemini = parsed.weights['agy-gemini'] ?? 10;
           const legacyAgyOther = parsed.weights['agy-other'] ?? 10;
+          const legacyAgyArgon = parsed.weights['agy-argon'] ?? 0;
 
           config.accounts = [
             {
@@ -116,7 +119,7 @@ export function loadConfig(): Config {
               displayName: 'AGY',
               type: 'agy',
               command: 'agy',
-              weight: legacyAgyGemini + legacyAgyOther,
+              weight: legacyAgyGemini + legacyAgyOther + legacyAgyArgon,
             },
           ];
         }
@@ -186,7 +189,10 @@ export function handleConfigCommand(args: string[]): boolean {
     for (const acc of config.accounts) {
       const envStr = acc.env ? ` (env: ${JSON.stringify(acc.env)})` : '';
       const cmdStr = acc.command ? ` [cmd: ${acc.command}]` : '';
-      console.log(`  ${BOLD}${acc.id.padEnd(16)}${R} | Type: ${acc.type.padEnd(7)} | Weight: ${String(acc.weight).padEnd(4)} | Name: "${acc.displayName}"${cmdStr}${envStr}`);
+      const subStr = acc.subWeights
+        ? ` (sub: Flash=${acc.subWeights.gemini ?? 'auto'}, Argon=${acc.subWeights.argon ?? 'auto'}, Other=${acc.subWeights.other ?? 'auto'})`
+        : (acc.type === 'agy' ? ' (sub-ratio: 5:1:1)' : '');
+      console.log(`  ${BOLD}${acc.id.padEnd(16)}${R} | Type: ${acc.type.padEnd(7)} | Weight: ${String(acc.weight).padEnd(4)} | Name: "${acc.displayName}"${cmdStr}${envStr}${subStr}`);
     }
     console.log();
     console.log(`${BOLD}Settings:${R}`);
@@ -311,15 +317,57 @@ export function handleConfigCommand(args: string[]): boolean {
       return true;
     }
 
-    // Checking account update
-    const account = config.accounts.find(a => a.id.toLowerCase() === keyOrId.toLowerCase());
+    // Checking account update (support base account or sub-slot like agy-argon, agy-gemini, agy-other)
+    let targetSubKey: string | null = null;
+    let account = config.accounts.find(a => a.id.toLowerCase() === keyOrId.toLowerCase());
+
+    if (!account) {
+      for (const a of config.accounts) {
+        for (const sub of ['gemini', 'flash', 'argon', 'other']) {
+          if (keyOrId.toLowerCase() === `${a.id.toLowerCase()}-${sub}`) {
+            account = a;
+            targetSubKey = sub === 'flash' ? 'gemini' : sub;
+            break;
+          }
+        }
+        if (account) break;
+      }
+    }
+
     if (!account) {
       console.error(`\n${BOLD}${RED}Error:${R} Unknown account or setting "${keyOrId}". Use agent-fuel config list to view accounts.\n`);
       process.exit(1);
     }
 
+    if (targetSubKey) {
+      const val = Number(rawVal ?? propertyOrVal);
+      if (!Number.isFinite(val) || val < 0) {
+        console.error(`\n${BOLD}${RED}Error:${R} Weight must be a non-negative number.\n`);
+        process.exit(1);
+      }
+      account.subWeights = account.subWeights || {};
+      account.subWeights[targetSubKey] = val;
+      saveConfig(config);
+      console.log(`\n${BOLD}${GREEN}✓${R} Set sub-weight ${targetSubKey} for account "${account.id}" to ${val}\n`);
+      return true;
+    }
+
     const prop = rawVal ? propertyOrVal.toLowerCase() : 'weight';
     const valueStr = rawVal ?? propertyOrVal;
+
+    if (['gemini', 'flash', 'argon', 'other'].includes(prop)) {
+      const val = Number(valueStr);
+      if (!Number.isFinite(val) || val < 0) {
+        console.error(`\n${BOLD}${RED}Error:${R} Sub-weight must be a non-negative number.\n`);
+        process.exit(1);
+      }
+      account.subWeights = account.subWeights || {};
+      const key = prop === 'flash' ? 'gemini' : prop;
+      account.subWeights[key] = val;
+      saveConfig(config);
+      console.log(`\n${BOLD}${GREEN}✓${R} Set sub-weight ${key} for account "${account.id}" to ${val}\n`);
+      return true;
+    }
 
     if (prop === 'weight') {
       const val = Number(valueStr);
@@ -347,7 +395,7 @@ export function handleConfigCommand(args: string[]): boolean {
       return true;
     }
 
-    console.error(`\n${BOLD}${RED}Error:${R} Unknown property "${prop}". Supported properties: weight, name, command\n`);
+    console.error(`\n${BOLD}${RED}Error:${R} Unknown property "${prop}". Supported properties: weight, flash/gemini, argon, other, name, command\n`);
     process.exit(1);
   }
 

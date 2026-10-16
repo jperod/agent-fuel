@@ -156,9 +156,10 @@ agent-fuel config add-account codex-work \
 ## 4. Google Antigravity Adapter (`agy`)
 
 ### Extraction Flow
-Spawns `agy`, inspects the status line breakdown, and splits usage into two separate snapshots:
-- **AGY Gemini**: Tracks Google Gemini model quotas and 5-hour limits.
-- **AGY Other**: Tracks Claude and GPT model quotas and weekly constraints.
+Spawns `agy`, inspects the status line breakdown, and splits usage into separate snapshots:
+- **AGY ╭ Flash & Pro**: Tracks core Google Gemini models (Gemini Flash & Gemini Pro) sharing the standard 5-hour and weekly pool.
+- **AGY │ Argon**: Tracks dedicated Gemini 4 Argon weekly quotas and specialized blocks.
+- **AGY ╰ Other**: Tracks Claude and GPT model quotas and weekly constraints.
 
 ### Configuration Example
 

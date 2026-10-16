@@ -22,6 +22,16 @@ const GRAY  = '\x1b[90m';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
+export function visibleLength(str: string): number {
+  return str.replace(/\x1b\[[0-9;]*m/g, '').length;
+}
+
+export function padLabel(str: string, width: number): string {
+  const visLen = visibleLength(str);
+  const diff = width - visLen;
+  return diff > 0 ? str + ' '.repeat(diff) : str;
+}
+
 export function getDisplayName(input: string | UsageSnapshot): string {
   if (typeof input === 'object' && input !== null) {
     if (input.displayName) return input.displayName;
@@ -30,8 +40,9 @@ export function getDisplayName(input: string | UsageSnapshot): string {
   switch (input) {
     case 'codex':       return 'Codex';
     case 'claude-code': return 'Claude Code';
-    case 'agy-gemini':  return 'AGY Gemini';
-    case 'agy-other':   return 'AGY Other';
+    case 'agy-gemini':  return 'AGY ╭ Flash & Pro';
+    case 'agy-argon':   return '    │ Argon';
+    case 'agy-other':   return '    ╰ Other';
     case 'grok':        return 'Grok Build';
     case 'cursor':      return 'Cursor Agent';
     case 'total':       return 'Total';
@@ -118,10 +129,13 @@ export function formatRow(snap: UsageSnapshot, padWidth = 13): string {
   if (snap.resetAt) parts.push(formatResetAt(snap.resetAt));
 
   if (snap.tool.includes('agy') && snap.raw && typeof snap.raw === 'object') {
-    let label = (snap.raw as Record<string, unknown>).matchedModel;
-    if (typeof label === 'string' && label) {
-      label = label.replace(/\s*-\s*(?:weekly|five\s*hour|5\s*h)\s*limit/i, '');
-      parts.push(`${GRAY}[${label}]${R}`);
+    const rawLabel = (snap.raw as Record<string, unknown>).matchedModel;
+    if (typeof rawLabel === 'string' && rawLabel) {
+      let label = rawLabel.replace(/\s*-\s*.*(?:limit|remaining).*/i, '').trim();
+      label = label.replace(/\s*-\s*(?:weekly|five\s*hour|5\s*h)\s*limit/i, '').trim();
+      if (label) {
+        parts.push(`${GRAY}[${label}]${R}`);
+      }
     }
   }
 
@@ -140,7 +154,8 @@ export function formatRow(snap: UsageSnapshot, padWidth = 13): string {
   const detailStr = parts.length > 0 ? ` ${parts.join(' ')}` : '';
   const isTotal = snap.tool === 'total';
   const labelPrefix = isTotal ? `${BOLD}${CYAN}` : BOLD;
-  return `${labelPrefix}${displayName.padEnd(padWidth)}${R} [${barStr}] ${percentStr}${detailStr}`;
+  const paddedLabel = padLabel(`${labelPrefix}${displayName}${R}`, padWidth);
+  return `${paddedLabel} [${barStr}] ${percentStr}${detailStr}`;
 }
 
 // ── Public render functions ────────────────────────────────────────────────
