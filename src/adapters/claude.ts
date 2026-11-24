@@ -1,50 +1,142 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { QuotaAdapter, UsageSnapshot } from './index.js';
-import { TuiScraper, sleep } from '../tmux.js';
+import {
+  TuiScraper,
+  assertSafeCommand,
+  buildInteractiveShellCommand,
+  expandTilde,
+  resolveEnv,
+  sleep,
+  stripAnsi,
+} from '../tmux.js';
 import { debug } from '../debug.js';
+import { AccountConfig, getSafeWorkingDir } from '../config.js';
 
-import { AccountConfig } from '../config.js';
+const execFileAsync = promisify(execFile);
+
+interface ClaudeAuthStatus {
+  loggedIn?: boolean;
+  authMethod?: string;
+  apiProvider?: string;
+  subscriptionType?: string;
+  planTier?: string;
+}
+
+async function checkClaudeAuthStatus(cmd = 'claude', env?: Record<string, string>): Promise<ClaudeAuthStatus | null> {
+  const safeCmd = assertSafeCommand(cmd);
+  const mergedEnv = resolveEnv(env);
+  const cwd = getSafeWorkingDir();
+  try {
+    let stdout = '';
+    try {
+      const parts = safeCmd.split(/\s+/);
+      const bin = expandTilde(parts[0]);
+      const extraArgs = parts.slice(1);
+      ({ stdout } = await execFileAsync(bin, [...extraArgs, 'auth', 'status'], {
+        cwd,
+        env: mergedEnv,
+        timeout: 4_000,
+        maxBuffer: 256 * 1024,
+      }));
+    } catch (err) {
+      const errObj = err as { code?: string; stdout?: string };
+      if (errObj.code === 'ENOENT') {
+        const userShell = process.env.SHELL || '/bin/sh';
+        const shellCmd = buildInteractiveShellCommand(safeCmd, env, ['auth', 'status']);
+        try {
+          ({ stdout } = await execFileAsync(userShell, ['-i', '-c', shellCmd], {
+            cwd,
+            env: mergedEnv,
+            timeout: 5_000,
+            maxBuffer: 256 * 1024,
+          }));
+        } catch (shellErr) {
+          const shellOut = (shellErr as { stdout?: string }).stdout;
+          if (typeof shellOut === 'string' && shellOut.includes('{')) {
+            stdout = shellOut;
+          } else {
+            return null;
+          }
+        }
+      } else if (typeof errObj.stdout === 'string' && errObj.stdout.includes('{')) {
+        stdout = errObj.stdout;
+      } else {
+        return null;
+      }
+    }
+
+    const start = stdout.indexOf('{');
+    const end = stdout.lastIndexOf('}');
+    if (start === -1 || end <= start) return null;
+    return JSON.parse(stdout.slice(start, end + 1)) as ClaudeAuthStatus;
+  } catch {
+    return null;
+  }
+}
 
 // ── TUI scraper ────────────────────────────────────────────────────────────
 
 /**
- * Launches `claude` in a tmux session, opens /status, navigates to the
- * Status tab (which shows real quota usage bars), and returns the captured
- * screen text.
- *
- * The Status tab renders persistently (not transient), so regular
- * capture-pane is sufficient — no pipe-pane needed.
+ * Launches `claude` in a tmux session, dismisses any startup prompts
+ * (including the trust prompt where "No, exit" may be focused by default),
+ * opens /usage, and returns the captured Usage tab text.
  */
 async function runClaudeScrape(cmd = 'claude', env?: Record<string, string>): Promise<string> {
-  const fullCmd = `DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 ${cmd}`;
-  const tui = new TuiScraper(fullCmd, env);
+  const scrapeEnv: Record<string, string> = {
+    DISABLE_AUTOUPDATER: '1',
+    DISABLE_TELEMETRY: '1',
+    ...env,
+  };
+  const tui = new TuiScraper(cmd, scrapeEnv);
   try {
     tui.start();
 
-    const CLAUDE_READY  = /Welcome back|Try "/i;
-    const CLAUDE_DIALOG = /trust this folder|Update available|terms of service|telemetry|analytics|Chrome extension|use my browser|browser tools/i;
-    const CLAUDE_EITHER = new RegExp(`(?:${CLAUDE_READY.source})|(?:${CLAUDE_DIALOG.source})|❯`, 'i');
+    const CLAUDE_READY  = /Claude Code v[\d.]+|shift\+tab to cycle|Welcome back|Try "/i;
+    const CLAUDE_DIALOG = /trust this folder|Quick safety check|Update available|terms of service|telemetry|analytics|Chrome extension|use my browser|browser tools/i;
+    const CLAUDE_UNAUTH = /Let's get started|Choose the text style|Select login method|Paste code here/i;
+    const CLAUDE_EITHER = new RegExp(`(?:${CLAUDE_READY.source})|(?:${CLAUDE_DIALOG.source})|(?:${CLAUDE_UNAUTH.source})|❯`, 'i');
     const CLAUDE_STARTUP_MS = 25_000;
-    const CLAUDE_DIALOG_SETTLE_MS = 1_000;
+    const CLAUDE_DIALOG_SETTLE_MS = 800;
 
     const dialogDeadline = Date.now() + CLAUDE_STARTUP_MS;
     let screen = await tui.waitFor(CLAUDE_EITHER, CLAUDE_STARTUP_MS, 0);
 
     while (Date.now() < dialogDeadline) {
-      if (/Update available/i.test(screen)) {
+      if (CLAUDE_UNAUTH.test(screen)) {
+        debug('claude:scrape', 'unauthenticated onboarding screen detected');
+        return 'NOT_LOGGED_IN';
+      } else if (/Update available/i.test(screen)) {
         debug('claude:scrape', 'Update available prompt detected, sending Down + Enter to skip...');
         tui.sendKey('Down');
         await sleep(200);
         tui.sendKey('Enter');
-      } else if (/trust this folder/i.test(screen)) {
-        debug('claude:scrape', 'trust folder prompt detected, confirming trust...');
-        tui.sendKey('Enter');
+      } else if (/trust this folder|Quick safety check/i.test(screen)) {
+        debug('claude:scrape', 'trust folder prompt detected, ensuring Yes is selected...');
+        // Allow Ink's input listener time to attach after initial frame render, then verify cursor moved before Enter
+        await sleep(300);
+        let current = tui.capture(0);
+        for (let attempt = 0; attempt < 5; attempt++) {
+          if (!/No,\s*exit/i.test(current) || /❯[^\n]*Yes,\s*I trust/i.test(current)) {
+            break;
+          }
+          tui.sendKey('Down');
+          await sleep(250);
+          current = tui.capture(0);
+        }
+        if (/❯[^\n]*Yes,\s*I trust/i.test(current) || !/❯[^\n]*No,\s*exit/i.test(current)) {
+          tui.sendKey('Enter');
+        }
       } else if (/Chrome extension|use my browser|browser tools/i.test(screen)) {
         debug('claude:scrape', 'Chrome extension prompt detected, sending Enter...');
         tui.sendKey('Enter');
       } else if (/terms of service|telemetry|analytics/i.test(screen)) {
         debug('claude:scrape', 'onboarding prompt detected, sending Enter...');
         tui.sendKey('Enter');
-      } else if (CLAUDE_READY.test(screen) || (screen.includes('❯') && !CLAUDE_DIALOG.test(screen))) {
+      } else if (/shift\+tab to cycle/i.test(screen) && !/trust this folder|Quick safety check|No,\s*exit|Update available/i.test(screen)) {
+        debug('claude:scrape', 'Claude prompt is ready');
+        break;
+      } else if ((CLAUDE_READY.test(screen) || screen.includes('❯')) && !CLAUDE_DIALOG.test(screen) && !/No,\s*exit|Yes,\s*I trust/i.test(screen)) {
         debug('claude:scrape', 'Claude prompt is ready');
         break;
       }
@@ -56,31 +148,40 @@ async function runClaudeScrape(cmd = 'claude', env?: Record<string, string>): Pr
       screen = await tui.waitFor(CLAUDE_EITHER, remaining, 0);
     }
 
-    // Open the /status panel
-    tui.send('/status');
-    // Wait for the status panel tabs to appear
-    const settingsScreen = await tui.waitFor(/Settings\s+Status/i, 10_000, 0);
+    // Open the /usage tab directly (avoids relying on /status tab order)
+    debug('claude:scrape', 'sending /usage command');
+    tui.send('/usage');
 
-    // If we are not logged in, we can stop here and return the settings screen
-    if (/Auth token:\s*none/i.test(settingsScreen) || /Not logged in/i.test(settingsScreen)) {
-      return settingsScreen;
+    // Wait for either the Usage view or a clear usage/auth marker; submit again if stuck in autocomplete
+    const usageReadyPattern = /\d+%\s+used|API Usage Billing|Auth token:\s*none|Not logged in|Failed to load usage/i;
+    const usageDeadline = Date.now() + 10_000;
+    let retriedEnter = false;
+    while (Date.now() < usageDeadline) {
+      screen = tui.capture(0);
+      if (usageReadyPattern.test(screen)) {
+        break;
+      }
+      if (!retriedEnter && /[❯>]\s*\/usage/i.test(screen)) {
+        await sleep(300);
+        if (!usageReadyPattern.test(tui.capture(0))) {
+          debug('claude:scrape', '/usage still on input prompt — sending Enter again');
+          tui.sendKey('Enter');
+          retriedEnter = true;
+        }
+      }
+      if (!tui.isAlive()) {
+        throw new Error('Claude TUI exited before /usage rendered');
+      }
+      await sleep(250);
     }
 
-    // Navigate to the Status tab (second tab after Settings)
-    tui.sendKey('Tab');
-    await sleep(300);
-    tui.sendKey('Tab');
-
-    // Wait for the status tab content to render (shows usage bars OR stats like cost/duration)
-    screen = await tui.waitFor(/\d+%\s+used|Total cost|Total duration/i, 8_000, 0);
-
-    // If it is still loading usage data, wait for it to finish
-    const deadline = Date.now() + 6_000;
+    // If usage data is still refreshing/scanning, allow a short settle window for updated figures
+    const settleDeadline = Date.now() + 6_000;
     while (
       (screen.includes('Loading usage data') ||
        screen.includes('Scanning local sessions') ||
        screen.includes('Refreshing')) &&
-      Date.now() < deadline
+      Date.now() < settleDeadline
     ) {
       await sleep(200);
       screen = tui.capture(0);
@@ -112,7 +213,7 @@ function to24h(s: string): string {
   );
 }
 
-interface ClaudeScrapeResult {
+export interface ClaudeScrapeResult {
   sessionUsedPct: number | null;
   sessionResetAt: string | null;
   weeklyUsedPct: number | null;
@@ -121,11 +222,12 @@ interface ClaudeScrapeResult {
   isNotLoggedIn?: boolean;
 }
 
-function parseScrapeOutput(screen: string): ClaudeScrapeResult {
+export function parseScrapeOutput(rawScreen: string): ClaudeScrapeResult {
+  const screen = stripAnsi(rawScreen);
   debug('claude:parse', `screen length: ${screen.length}`);
   debug('claude:parse', 'screen', screen);
 
-  const isNotLoggedIn = /Auth token:\s*none/i.test(screen) || /Not logged in/i.test(screen);
+  const isNotLoggedIn = screen === 'NOT_LOGGED_IN' || /Auth token:\s*none|Not logged in/i.test(screen);
   const isApiBilling = /API Usage Billing/i.test(screen);
 
   const lines = screen.split(/\r?\n/).map(l => l.trim());
@@ -137,10 +239,10 @@ function parseScrapeOutput(screen: string): ClaudeScrapeResult {
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    const usedMatch = line.match(/(\d+)%\s+used/i);
+    const usedMatch = line.match(/([\d.]+)%\s+used/i);
     if (usedMatch) {
-      const pct = parseInt(usedMatch[1], 10);
-      
+      const pct = Math.round(parseFloat(usedMatch[1]));
+
       let type: 'session' | 'weekly' | null = null;
       for (let j = Math.max(0, i - 3); j < i; j++) {
         if (/Current session/i.test(lines[j])) {
@@ -201,8 +303,21 @@ export class ClaudeQuotaAdapter implements QuotaAdapter {
       source: 'unknown',
     });
 
-    debug('claude:fetch', `starting TUI scrape for account ${toolId} (${cmd})`);
+    debug('claude:fetch', `checking auth and starting TUI scrape for account ${toolId} (${cmd})`);
     try {
+      const authStatus = await checkClaudeAuthStatus(cmd, env);
+      if (authStatus && authStatus.loggedIn === false) {
+        debug('claude:fetch', 'claude auth status reports not logged in');
+        return {
+          tool: toolId,
+          displayName,
+          remainingPercent: null,
+          usedPercent: null,
+          resetAt: 'not logged in',
+          source: 'unknown',
+        };
+      }
+
       const screen = await runClaudeScrape(cmd, env);
       const result = parseScrapeOutput(screen);
 
@@ -218,7 +333,7 @@ export class ClaudeQuotaAdapter implements QuotaAdapter {
         };
       }
 
-      if (result.isApiBilling) {
+      if (result.isApiBilling || (authStatus?.authMethod === 'apiKey' && result.sessionUsedPct === null && result.weeklyUsedPct === null)) {
         debug('claude:fetch', 'detected API Usage Billing');
         return {
           tool: toolId,
@@ -250,7 +365,11 @@ export class ClaudeQuotaAdapter implements QuotaAdapter {
         const resetAt = limiting.reset;
         const weeklyLimitReached = weeklyRemaining === 0;
 
-        const isFreeTier = /Free plan|\(Free\)/i.test(screen);
+        const isFreeTier =
+          /Free plan|\(Free\)|Claude Free/i.test(screen) ||
+          authStatus?.subscriptionType?.toLowerCase() === 'free' ||
+          authStatus?.planTier?.toLowerCase() === 'free';
+
         return {
           tool: toolId,
           displayName,

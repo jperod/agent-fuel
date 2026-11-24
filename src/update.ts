@@ -3,25 +3,41 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { CONFIG_DIR } from './config.js';
+import { CONFIG_DIR, writePrivateFileSync } from './config.js';
 import { debug } from './debug.js';
+import { sanitizeTerminalText } from './tmux.js';
 
 const CACHE_FILE = path.join(CONFIG_DIR, 'update-cache.json');
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const SEMVER_RE = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/;
 
 interface UpdateCache {
   lastChecked: number;
   latestVersion: string;
 }
 
-function isNewer(v1: string, v2: string): boolean {
-  const parse = (s: string) => s.replace(/^v/, '').split('.').map(Number);
-  const [major1, minor1, patch1] = parse(v1);
-  const [major2, minor2, patch2] = parse(v2);
+/** Validates a semver version string (without build metadata). */
+export function isValidSemver(version: string): boolean {
+  return SEMVER_RE.test(version.trim());
+}
 
+/** Returns true if candidate `v2` is a newer release than `v1`, ignoring prereleases when current is stable. */
+export function isNewer(v1: string, v2: string): boolean {
+  const m1 = v1.trim().match(SEMVER_RE);
+  const m2 = v2.trim().match(SEMVER_RE);
+  if (!m1 || !m2) return false;
+
+  const [major1, minor1, patch1] = [Number(m1[1]), Number(m1[2]), Number(m1[3])];
+  const [major2, minor2, patch2] = [Number(m2[1]), Number(m2[2]), Number(m2[3])];
+  const pre1 = m1[4];
+  const pre2 = m2[4];
+
+  // Do not offer prereleases to stable installations
+  if (pre2) return false;
   if (major2 !== major1) return major2 > major1;
-  if (major2 === major1 && minor2 !== minor1) return minor2 > minor1;
-  return patch2 > patch1;
+  if (minor2 !== minor1) return minor2 > minor1;
+  if (patch2 !== patch1) return patch2 > patch1;
+  return Boolean(pre1) && !pre2;
 }
 
 /**
@@ -40,14 +56,14 @@ export async function runUpdateCheckNow(currentVersion: string): Promise<void> {
 
     if (!res.ok) return;
 
-    const data = await res.json() as { version: string };
-    const latestVersion = data.version;
+    const data = await res.json() as { version?: unknown };
+    if (typeof data?.version !== 'string' || !isValidSemver(data.version)) return;
+    const latestVersion = data.version.trim().replace(/^v/, '');
 
-    fs.mkdirSync(CONFIG_DIR, { recursive: true });
-    fs.writeFileSync(CACHE_FILE, JSON.stringify({
+    writePrivateFileSync(CACHE_FILE, JSON.stringify({
       lastChecked: Date.now(),
       latestVersion
-    }), 'utf8');
+    }));
 
     debug('update:check', `Background query saved latest: ${latestVersion}`);
   } catch (err) {
@@ -69,7 +85,7 @@ export function checkUpdateBackground(currentVersion: string): string | null {
     }
 
     const now = Date.now();
-    const needsCheck = !cache || (now - cache.lastChecked > CHECK_INTERVAL_MS);
+    const needsCheck = !cache || !Number.isFinite(cache.lastChecked) || (now - cache.lastChecked > CHECK_INTERVAL_MS);
 
     if (needsCheck) {
       debug('update:check', 'Cache expired or missing. Spawning detached check process.');
@@ -85,8 +101,13 @@ export function checkUpdateBackground(currentVersion: string): string | null {
       child.unref(); // Release node loop hold on child process
     }
 
-    if (cache && isNewer(currentVersion, cache.latestVersion)) {
-      return cache.latestVersion;
+    if (
+      cache &&
+      typeof cache.latestVersion === 'string' &&
+      isValidSemver(cache.latestVersion) &&
+      isNewer(currentVersion, cache.latestVersion)
+    ) {
+      return cache.latestVersion.trim().replace(/^v/, '');
     }
   } catch (err) {
     debug('update:check', 'Error during background update evaluation', String(err));
@@ -99,9 +120,10 @@ export function checkUpdateBackground(currentVersion: string): string | null {
  */
 export function promptAndUpgrade(latestVersion: string): Promise<void> {
   return new Promise((resolve) => {
-    if (!process.stdout.isTTY || !process.stdin.isTTY) {
+    if (!process.stdout.isTTY || !process.stdin.isTTY || !isValidSemver(latestVersion)) {
       return resolve();
     }
+    const safeVersion = sanitizeTerminalText(latestVersion.trim().replace(/^v/, ''));
 
     const rl = readline.createInterface({
       input: process.stdin,
@@ -121,23 +143,23 @@ export function promptAndUpgrade(latestVersion: string): Promise<void> {
       resolve();
     }, 120000); // 2 minutes
 
-    rl.question(`\n${BOLD}${CYAN}🔔 Update Available:${R} A new version (${GREEN}v${latestVersion}${R}) of agent-fuel is available.\nWould you like to install it now? [y/N]: `, (answer) => {
+    rl.question(`\n${BOLD}${CYAN}🔔 Update Available:${R} A new version (${GREEN}v${safeVersion}${R}) of agent-fuel is available.\nWould you like to install it now? [y/N]: `, (answer) => {
       clearTimeout(promptTimeout);
       rl.close();
       
       const cleanAnswer = answer.trim().toLowerCase();
       if (cleanAnswer === 'y' || cleanAnswer === 'yes') {
-        console.log(`\n${BOLD}Updating agent-fuel to v${latestVersion}...${R}`);
+        console.log(`\n${BOLD}Updating agent-fuel to v${safeVersion}...${R}`);
         
         const result = spawnSync('npm', ['install', '-g', 'agent-fuel'], {
           stdio: 'inherit'
         });
 
         if (result.status === 0) {
-          console.log(`\n${BOLD}${GREEN}✓ Successfully updated!${R} Please restart agent-fuel to use version v${latestVersion}.\n`);
+          console.log(`\n${BOLD}${GREEN}✓ Successfully updated!${R} Please restart agent-fuel to use version v${safeVersion}.\n`);
         } else {
-          console.error(`\n${BOLD}${RED}✗ Update failed.${R} You may need administrative privileges. Please try running:`);
-          console.error(`  ${BOLD}sudo npm install -g agent-fuel${R}\n`);
+          console.error(`\n${BOLD}${RED}✗ Update failed.${R} Check npm global directory permissions (or use a user-scoped prefix / nvm) and re-run:`);
+          console.error(`  ${BOLD}npm install -g agent-fuel${R}\n`);
         }
       }
       resolve();

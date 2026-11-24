@@ -58,10 +58,82 @@ export const DEFAULT_CONFIG: Config = {
   showTotal: true,
 };
 
-function ensureDir(dir: string): void {
+const SENSITIVE_ENV_KEY_RE = /(?:KEY|TOKEN|SECRET|PASS|PWD|AUTH|CREDENTIAL|COOKIE|BEARER)/i;
+
+/** Returns true if an environment variable name is a valid POSIX identifier. */
+export function isValidEnvKey(key: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(key);
+}
+
+/** Returns true if an account ID avoids path traversal and separator characters. */
+export function isValidAccountId(id: string): boolean {
+  return id.length > 0 && !/[\\/\0]/.test(id) && !id.includes('..');
+}
+
+/** Returns true if a configured CLI command string is free of shell chaining/subshell operators. */
+export function isSafeCommandString(cmd: string): boolean {
+  const trimmed = cmd.trim();
+  return trimmed.length > 0 && !/[\0\r\n;|&`<>]/.test(trimmed) && !trimmed.includes('$(');
+}
+
+/** Returns a shallow copy of env with secret-bearing variable values masked. */
+export function redactEnv(env?: Record<string, string>): Record<string, string> | undefined {
+  if (!env) return undefined;
+  const masked: Record<string, string> = {};
+  for (const [k, v] of Object.entries(env)) {
+    masked[k] = SENSITIVE_ENV_KEY_RE.test(k) ? '***' : v;
+  }
+  return masked;
+}
+
+/**
+ * Ensures `dir` exists as a real directory (not a symlink) owned by the current
+ * user with 0700 permissions. Returns false if an unsafe path is encountered.
+ */
+export function ensurePrivateDir(dir: string): boolean {
   try {
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const st = fs.lstatSync(dir);
+    if (st.isSymbolicLink() || !st.isDirectory()) return false;
+    if (typeof process.getuid === 'function' && st.uid !== process.getuid()) return false;
+    if ((st.mode & 0o077) !== 0) {
+      fs.chmodSync(dir, 0o700);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Writes `content` to `filePath` with 0600 permissions inside a verified private parent directory. */
+export function writePrivateFileSync(filePath: string, content: string): void {
+  const dir = path.dirname(filePath);
+  if (!ensurePrivateDir(dir)) {
+    throw new Error(`Refusing to write to unsafe directory: ${dir}`);
+  }
+  fs.writeFileSync(filePath, content, { encoding: 'utf8', mode: 0o600 });
+  fs.chmodSync(filePath, 0o600);
+}
+
+/**
+ * Returns an empty user-private working directory for running external CLIs so
+ * they never execute inside or auto-trust an untrusted repository CWD.
+ */
+export function getSafeWorkingDir(): string {
+  const workspaceDir = path.join(CONFIG_DIR, 'workspace');
+  if (ensurePrivateDir(workspaceDir)) {
+    return workspaceDir;
+  }
+  return os.tmpdir();
+}
+
+function tightenFileModeIfOwned(filePath: string): void {
+  try {
+    const st = fs.lstatSync(filePath);
+    if (st.isSymbolicLink() || !st.isFile()) return;
+    if (typeof process.getuid === 'function' && st.uid !== process.getuid()) return;
+    if ((st.mode & 0o077) !== 0) {
+      fs.chmodSync(filePath, 0o600);
     }
   } catch {
     // Ignore
@@ -77,20 +149,38 @@ export function loadConfig(): Config {
   // 1. Read from config file
   try {
     if (fs.existsSync(CONFIG_FILE)) {
+      ensurePrivateDir(CONFIG_DIR);
+      tightenFileModeIfOwned(CONFIG_FILE);
       const content = fs.readFileSync(CONFIG_FILE, 'utf8');
       const parsed = JSON.parse(content);
       
       if (parsed && typeof parsed === 'object') {
         if (Array.isArray(parsed.accounts) && parsed.accounts.length > 0) {
-          config.accounts = parsed.accounts.map((ac: any) => ({
-            id: String(ac.id || ac.displayName || 'account'),
-            displayName: String(ac.displayName || ac.id || 'Account'),
-            type: (['claude', 'codex', 'agy', 'grok', 'cursor'].includes(ac.type) ? ac.type : 'claude') as ToolType,
-            command: ac.command ? String(ac.command) : undefined,
-            env: ac.env && typeof ac.env === 'object' ? ac.env : undefined,
-            weight: typeof ac.weight === 'number' && Number.isFinite(ac.weight) && ac.weight >= 0 ? ac.weight : 20,
-            subWeights: ac.subWeights && typeof ac.subWeights === 'object' ? ac.subWeights : undefined,
-          }));
+          config.accounts = parsed.accounts.map((ac: any) => {
+            const rawId = String(ac.id || ac.displayName || 'account');
+            const safeId = isValidAccountId(rawId) ? rawId : rawId.replace(/[\\/]/g, '-').replace(/\.\./g, '-');
+            let safeEnv: Record<string, string> | undefined;
+            if (ac.env && typeof ac.env === 'object' && !Array.isArray(ac.env)) {
+              const filtered: Record<string, string> = {};
+              for (const [k, v] of Object.entries(ac.env as Record<string, unknown>)) {
+                if (isValidEnvKey(k) && typeof v === 'string') {
+                  filtered[k] = v;
+                }
+              }
+              if (Object.keys(filtered).length > 0) safeEnv = filtered;
+            }
+            const rawCmd = ac.command ? String(ac.command) : undefined;
+            const safeCmd = rawCmd && isSafeCommandString(rawCmd) ? rawCmd : undefined;
+            return {
+              id: safeId || 'account',
+              displayName: String(ac.displayName || safeId || 'Account'),
+              type: (['claude', 'codex', 'agy', 'grok', 'cursor'].includes(ac.type) ? ac.type : 'claude') as ToolType,
+              command: safeCmd,
+              env: safeEnv,
+              weight: typeof ac.weight === 'number' && Number.isFinite(ac.weight) && ac.weight >= 0 ? ac.weight : 20,
+              subWeights: ac.subWeights && typeof ac.subWeights === 'object' ? ac.subWeights : undefined,
+            };
+          });
         } else if (parsed.weights && typeof parsed.weights === 'object') {
           // Migration path from legacy weights config
           const legacyClaude = parsed.weights['claude-code'] ?? 20;
@@ -156,9 +246,8 @@ export function loadConfig(): Config {
 }
 
 export function saveConfig(config: Config): void {
-  ensureDir(CONFIG_DIR);
   try {
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf8');
+    writePrivateFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(`Could not write config file ${CONFIG_FILE}: ${msg}`);
@@ -187,11 +276,11 @@ export function handleConfigCommand(args: string[]): boolean {
     
     console.log(`${BOLD}Configured Accounts:${R}`);
     for (const acc of config.accounts) {
-      const envStr = acc.env ? ` (env: ${JSON.stringify(acc.env)})` : '';
+      const envStr = acc.env ? ` (env: ${JSON.stringify(redactEnv(acc.env))})` : '';
       const cmdStr = acc.command ? ` [cmd: ${acc.command}]` : '';
       const subStr = acc.subWeights
-        ? ` (sub: Flash=${acc.subWeights.gemini ?? 'auto'}, Argon=${acc.subWeights.argon ?? 'auto'}, Other=${acc.subWeights.other ?? 'auto'})`
-        : (acc.type === 'agy' ? ' (sub-ratio: 5:1:1)' : '');
+        ? ` (sub: Gemini=${acc.subWeights.gemini ?? 'auto'}, Other=${acc.subWeights.other ?? 'auto'}${acc.subWeights.argon !== undefined ? `, Argon=${acc.subWeights.argon}` : ''})`
+        : (acc.type === 'agy' ? ' (sub-ratio: 5:1)' : '');
       console.log(`  ${BOLD}${acc.id.padEnd(16)}${R} | Type: ${acc.type.padEnd(7)} | Weight: ${String(acc.weight).padEnd(4)} | Name: "${acc.displayName}"${cmdStr}${envStr}${subStr}`);
     }
     console.log();
@@ -212,8 +301,8 @@ export function handleConfigCommand(args: string[]): boolean {
 
   if (subCommand === 'add-account') {
     const id = args[2];
-    if (!id || id.startsWith('-')) {
-      console.error(`\n${BOLD}${RED}Error:${R} Usage: agent-fuel config add-account <id> --type <claude|codex|agy|grok|cursor> [--name "Name"] [--cmd "command"] [--env KEY=VAL] [--weight N]\n`);
+    if (!id || id.startsWith('-') || !isValidAccountId(id)) {
+      console.error(`\n${BOLD}${RED}Error:${R} Invalid or missing account id. Usage: agent-fuel config add-account <id> --type <claude|codex|agy|grok|cursor> [--name "Name"] [--cmd "command"] [--env KEY=VAL] [--weight N]\n`);
       process.exit(1);
     }
 
@@ -237,8 +326,13 @@ export function handleConfigCommand(args: string[]): boolean {
       } else if (arg === '--name' && args[i + 1]) {
         displayName = args[i + 1];
         i++;
-      } else if (arg === '--cmd' && args[i + 1]) {
-        command = args[i + 1];
+      } else if ((arg === '--cmd' || arg === '--command') && args[i + 1]) {
+        const candidate = args[i + 1];
+        if (!isSafeCommandString(candidate)) {
+          console.error(`\n${BOLD}${RED}Error:${R} Invalid command "${candidate}". Shell chaining operators are not allowed.\n`);
+          process.exit(1);
+        }
+        command = candidate;
         i++;
       } else if (arg === '--weight' && args[i + 1]) {
         const w = Number(args[i + 1]);
@@ -247,7 +341,12 @@ export function handleConfigCommand(args: string[]): boolean {
       } else if (arg === '--env' && args[i + 1]) {
         const parts = args[i + 1].split('=');
         if (parts.length >= 2) {
-          env[parts[0]] = parts.slice(1).join('=');
+          const envKey = parts[0];
+          if (!isValidEnvKey(envKey)) {
+            console.error(`\n${BOLD}${RED}Error:${R} Invalid environment variable name "${envKey}".\n`);
+            process.exit(1);
+          }
+          env[envKey] = parts.slice(1).join('=');
         }
         i++;
       }
@@ -389,13 +488,17 @@ export function handleConfigCommand(args: string[]): boolean {
     }
 
     if (prop === 'command' || prop === 'cmd') {
+      if (!isSafeCommandString(valueStr)) {
+        console.error(`\n${BOLD}${RED}Error:${R} Invalid command "${valueStr}". Shell chaining operators are not allowed.\n`);
+        process.exit(1);
+      }
       account.command = valueStr;
       saveConfig(config);
       console.log(`\n${BOLD}${GREEN}✓${R} Set command for account "${account.id}" to "${valueStr}"\n`);
       return true;
     }
 
-    console.error(`\n${BOLD}${RED}Error:${R} Unknown property "${prop}". Supported properties: weight, flash/gemini, argon, other, name, command\n`);
+    console.error(`\n${BOLD}${RED}Error:${R} Unknown property "${prop}". Supported properties: weight, gemini, other, name, command\n`);
     process.exit(1);
   }
 

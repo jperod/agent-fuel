@@ -42,25 +42,22 @@ function buildSlotInfo(accounts: AccountConfig[]) {
   for (const acc of sortedAccounts) {
     if (acc.type === 'agy') {
       const geminiId = `${acc.id}-gemini`;
-      const argonId = `${acc.id}-argon`;
       const otherId = `${acc.id}-other`;
 
-      const prefix = acc.displayName.replace(/\s+(Gemini|Flash & Pro|Argon|Other)$/i, '');
+      const prefix = acc.displayName.replace(/\s+(Gemini|Flash & Pro|Argon|Other|Claude & GPT)$/i, '');
       const indent = ' '.repeat(prefix.length);
 
-      const geminiName = `${prefix} ╭ Flash & Pro`;
-      const argonName  = `${indent} │ Argon`;
+      const geminiName = `${prefix} ╭ Gemini`;
       const otherName  = `${indent} ╰ Other`;
 
-      slotOrder.push(geminiId, argonId, otherId);
-      const envGeminiWeight = process.env.AGENT_FUEL_WEIGHT_AGY_GEMINI ?? process.env.AGENT_FUEL_WEIGHT_AGY_FLASH;
-      const envArgonWeight = process.env.AGENT_FUEL_WEIGHT_AGY_ARGON;
-      const envOtherWeight = process.env.AGENT_FUEL_WEIGHT_AGY_OTHER;
+      slotOrder.push(geminiId, otherId);
+      const envPrefix = `AGENT_FUEL_WEIGHT_${acc.id.toUpperCase().replace(/-/g, '_')}`;
+      const envGeminiWeight = process.env[`${envPrefix}_GEMINI`] ?? process.env[`${envPrefix}_FLASH`] ?? process.env.AGENT_FUEL_WEIGHT_AGY_GEMINI ?? process.env.AGENT_FUEL_WEIGHT_AGY_FLASH;
+      const envOtherWeight = process.env[`${envPrefix}_OTHER`] ?? process.env.AGENT_FUEL_WEIGHT_AGY_OTHER;
 
-      // Pool capacity ratio: Flash & Pro pool is ~5x the size of Argon and Other (5:1:1 ratio, e.g. 10 / 2 / 2)
-      const subRatio = 5 + 1 + 1;
+      // Pool capacity ratio: Gemini pool is ~5x the size of the Claude & GPT ("Other") pool
+      const subRatio = 5 + 1;
       const defaultGeminiWeight = acc.subWeights?.gemini ?? acc.subWeights?.flash ?? (acc.weight * 5) / subRatio;
-      const defaultArgonWeight  = acc.subWeights?.argon  ?? (acc.weight * 1) / subRatio;
       const defaultOtherWeight  = acc.subWeights?.other  ?? (acc.weight * 1) / subRatio;
 
       const parseWeight = (raw: string | undefined, fallback: number) => {
@@ -72,10 +69,8 @@ function buildSlotInfo(accounts: AccountConfig[]) {
       };
 
       slotWeights.set(geminiId, parseWeight(envGeminiWeight, defaultGeminiWeight));
-      slotWeights.set(argonId, parseWeight(envArgonWeight, defaultArgonWeight));
       slotWeights.set(otherId, parseWeight(envOtherWeight, defaultOtherWeight));
       slotDisplayNames.set(geminiId, geminiName);
-      slotDisplayNames.set(argonId, argonName);
       slotDisplayNames.set(otherId, otherName);
     } else {
       slotOrder.push(acc.id);
@@ -210,7 +205,7 @@ function loadPackageVersion(): string {
     const pkg = JSON.parse(fs.readFileSync(path.join(dir, '../package.json'), 'utf8'));
     return pkg.version;
   } catch {
-    return '0.9.2';
+    return '0.9.3';
   }
 }
 
@@ -269,16 +264,52 @@ async function main(): Promise<void> {
   function fill(snaps: UsageSnapshot[]): void {
     for (const snap of snaps) {
       if (!SLOT_ORDER.includes(snap.tool)) {
-        SLOT_ORDER.push(snap.tool);
-        slotWeights.set(snap.tool, 5);
-        const name = snap.displayName || getDisplayName(snap);
-        slotDisplayNames.set(snap.tool, name);
-        const len = visibleLength(name);
-        if (len > maxLabelWidth) {
-          maxLabelWidth = len;
-          for (const [id, s] of snapshots) {
-            if (s) slots.set(id, formatRow(s, maxLabelWidth));
+        // Keep dynamic sub-slots (e.g. extra AGY model groups) grouped with their parent account;
+        // pick the longest matching ID so e.g. "agy-work-*" doesn't match account "agy".
+        const matchingAccount = [...config.accounts]
+          .filter(a => snap.tool.startsWith(`${a.id}-`))
+          .sort((a, b) => b.id.length - a.id.length)[0];
+        if (matchingAccount) {
+          const suffix = snap.tool.slice(matchingAccount.id.length + 1);
+          const envSub = process.env[`AGENT_FUEL_WEIGHT_${matchingAccount.id.toUpperCase().replace(/-/g, '_')}_${suffix.toUpperCase().replace(/-/g, '_')}`];
+          const configuredSub = matchingAccount.subWeights?.[suffix];
+          const parsedEnv = envSub !== undefined ? Number(envSub) : NaN;
+          const weight = Number.isFinite(parsedEnv) && parsedEnv >= 0
+            ? parsedEnv
+            : typeof configuredSub === 'number' && Number.isFinite(configuredSub) && configuredSub >= 0
+              ? configuredSub
+              : 5;
+          slotWeights.set(snap.tool, weight);
+
+          const otherIdx = SLOT_ORDER.indexOf(`${matchingAccount.id}-other`);
+          if (suffix === 'argon' && otherIdx !== -1) {
+            SLOT_ORDER.splice(otherIdx, 0, snap.tool);
+          } else {
+            let lastIdx = -1;
+            for (let idx = SLOT_ORDER.length - 1; idx >= 0; idx--) {
+              if (SLOT_ORDER[idx].startsWith(`${matchingAccount.id}-`)) {
+                lastIdx = idx;
+                break;
+              }
+            }
+            if (lastIdx !== -1) {
+              SLOT_ORDER.splice(lastIdx + 1, 0, snap.tool);
+            } else {
+              SLOT_ORDER.push(snap.tool);
+            }
           }
+        } else {
+          SLOT_ORDER.push(snap.tool);
+          slotWeights.set(snap.tool, 5);
+        }
+      }
+      const name = snap.displayName || getDisplayName(snap);
+      slotDisplayNames.set(snap.tool, name);
+      const len = visibleLength(name);
+      if (len > maxLabelWidth) {
+        maxLabelWidth = len;
+        for (const [id, s] of snapshots) {
+          if (s) slots.set(id, formatRow(s, maxLabelWidth));
         }
       }
       snapshots.set(snap.tool, snap);
@@ -287,7 +318,7 @@ async function main(): Promise<void> {
     redraw(slots, emitted, snapshots);
   }
 
-  await Promise.allSettled(adapters.map(adapter => adapter.fetchSnapshots().then(fill)));
+  await Promise.allSettled(adapters.map(adapter => adapter.fetchSnapshots().then(fill).catch(() => {})));
 
   if (spinnerTimer) clearInterval(spinnerTimer);
   redraw(slots, emitted, snapshots); // final clean repaint with all data

@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { UsageSnapshot } from './adapters/index.js';
+import { sanitizeTerminalText } from './tmux.js';
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -34,19 +35,19 @@ export function padLabel(str: string, width: number): string {
 
 export function getDisplayName(input: string | UsageSnapshot): string {
   if (typeof input === 'object' && input !== null) {
-    if (input.displayName) return input.displayName;
+    if (input.displayName) return sanitizeTerminalText(input.displayName);
     input = input.tool;
   }
   switch (input) {
     case 'codex':       return 'Codex';
     case 'claude-code': return 'Claude Code';
-    case 'agy-gemini':  return 'AGY ╭ Flash & Pro';
+    case 'agy-gemini':  return 'AGY ╭ Gemini';
     case 'agy-argon':   return '    │ Argon';
     case 'agy-other':   return '    ╰ Other';
     case 'grok':        return 'Grok Build';
     case 'cursor':      return 'Cursor Agent';
     case 'total':       return 'Total';
-    default:            return input;
+    default:            return sanitizeTerminalText(input);
   }
 }
 
@@ -67,7 +68,8 @@ function loadVersion(): string {
   }
 }
 
-function formatResetAt(resetAt: string): string {
+function formatResetAt(rawResetAt: string): string {
+  const resetAt = sanitizeTerminalText(rawResetAt).trim();
   if (resetAt.toLowerCase().includes('available')) {
     return `${GREEN}✓ quota available${R}`;
   }
@@ -84,6 +86,9 @@ function formatResetAt(resetAt: string): string {
   const agyMatch = resetAt.match(/^Refreshes in\s*(.+)/i);
   if (agyMatch) {
     return `${GRAY}(resets in ${agyMatch[1]})${R}`;
+  }
+  if (/^disabled/i.test(resetAt)) {
+    return `${GRAY}(${resetAt})${R}`;
   }
   const clean = resetAt.replace(/^resets\s+/i, '');
   return `${GRAY}(resets ${clean})${R}`;
@@ -125,6 +130,8 @@ export function formatRow(snap: UsageSnapshot, padWidth = 13): string {
     parts.push(`${GRAY}(wk: ${snap.breakdown.weekly}%)${R}`);
   } else if (snap.breakdown && typeof snap.breakdown.monthly === 'number') {
     parts.push(`${GRAY}(mo: ${snap.breakdown.monthly}%)${R}`);
+  } else if (snap.breakdown && typeof snap.breakdown.fiveHour === 'number') {
+    parts.push(`${GRAY}(5h: ${snap.breakdown.fiveHour}%)${R}`);
   } else {
     if (snap.limitType === 'weekly' && !snap.tool.includes('agy')) {
       parts.push(`${GRAY}[weekly]${R}`);
@@ -142,7 +149,7 @@ export function formatRow(snap: UsageSnapshot, padWidth = 13): string {
   if (snap.tool.includes('agy') && snap.raw && typeof snap.raw === 'object') {
     const rawLabel = (snap.raw as Record<string, unknown>).matchedModel;
     if (typeof rawLabel === 'string' && rawLabel) {
-      let label = rawLabel.replace(/\s*-\s*.*(?:limit|remaining).*/i, '').trim();
+      let label = sanitizeTerminalText(rawLabel).replace(/\s*-\s*.*(?:limit|remaining).*/i, '').trim();
       label = label.replace(/\s*-\s*(?:weekly|five\s*hour|5\s*h)\s*limit/i, '').trim();
       if (label) {
         parts.push(`${GRAY}[${label}]${R}`);

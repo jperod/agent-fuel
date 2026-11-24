@@ -4,21 +4,32 @@ import crypto from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { debug } from './debug.js';
+import {
+  CONFIG_DIR,
+  ensurePrivateDir,
+  getSafeWorkingDir,
+  isSafeCommandString,
+  isValidEnvKey,
+  redactEnv,
+} from './config.js';
 
 function ensureSafeTmuxDir(): void {
   if (process.env.TMUX_TMPDIR) return;
   try {
     const uid = typeof process.getuid === 'function' ? process.getuid() : 1000;
-    const dir = path.join(os.tmpdir(), `af-tmux-${uid}`);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { mode: 0o700, recursive: true });
+    const tmpCandidate = path.join(os.tmpdir(), `af-tmux-${uid}`);
+    if (ensurePrivateDir(tmpCandidate)) {
+      process.env.TMUX_TMPDIR = tmpCandidate;
+      return;
     }
-    try {
-      fs.chmodSync(dir, 0o700);
-    } catch {
-      // ignore
+    // If /tmp/af-tmux-${uid} was pre-created by another user or is a symlink,
+    // use a private subdir under CONFIG_DIR or a unique mkdtemp dir instead.
+    const configTmuxDir = path.join(CONFIG_DIR, 'tmux');
+    if (ensurePrivateDir(configTmuxDir)) {
+      process.env.TMUX_TMPDIR = configTmuxDir;
+      return;
     }
-    process.env.TMUX_TMPDIR = dir;
+    process.env.TMUX_TMPDIR = fs.mkdtempSync(path.join(os.tmpdir(), `af-tmux-${uid}-`));
   } catch {
     // ignore
   }
@@ -85,11 +96,71 @@ function registerSignalHandlers(): void {
 }
 registerSignalHandlers(); // called at import time — guarded by signalsRegistered flag
 
-function expandTilde(p: string): string {
+export function expandTilde(p: string): string {
   if (p.startsWith('~/') || p === '~') {
     return path.join(os.homedir(), p.slice(1));
   }
   return p;
+}
+
+/** Single-quotes a string for safe POSIX shell evaluation. */
+export function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Merges validated account env overrides into process.env, expanding leading tildes. */
+export function resolveEnv(env?: Record<string, string>): NodeJS.ProcessEnv {
+  const merged: NodeJS.ProcessEnv = { ...process.env };
+  if (env) {
+    for (const [k, v] of Object.entries(env)) {
+      if (!isValidEnvKey(k)) continue;
+      merged[k] = expandTilde(v);
+    }
+  }
+  return merged;
+}
+
+/** Validates a configured command string and returns it trimmed. */
+export function assertSafeCommand(cmd: string): string {
+  const trimmed = cmd.trim();
+  if (!isSafeCommandString(trimmed)) {
+    throw new Error(`Unsafe CLI command rejected: ${JSON.stringify(cmd)}`);
+  }
+  return trimmed;
+}
+
+/** Builds a safely-quoted `env KEY='VAL' <cmd> 'arg1' ...` string for interactive shell alias resolution. */
+export function buildInteractiveShellCommand(
+  cmd: string,
+  env?: Record<string, string>,
+  extraArgs: string[] = [],
+): string {
+  const safeCmd = assertSafeCommand(cmd);
+  const envEntries = env
+    ? Object.entries(env).filter(([k]) => isValidEnvKey(k))
+    : [];
+  const envPrefix = envEntries.length > 0
+    ? 'env ' + envEntries.map(([k, v]) => `${k}=${shellQuote(expandTilde(v))}`).join(' ') + ' '
+    : '';
+  const quotedExtra = extraArgs.length > 0
+    ? ' ' + extraArgs.map(a => shellQuote(a)).join(' ')
+    : '';
+  return `${envPrefix}${safeCmd}${quotedExtra}`;
+}
+
+/** Strips ANSI CSI/OSC escape sequences and non-printable control chars from captured terminal text. */
+export function stripAnsi(str: string): string {
+  // eslint-disable-next-line no-control-regex
+  return str
+    .replace(/\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)/g, '')
+    .replace(/\x1B\[[\x20-\x3f]*[\x40-\x7e]/g, '')
+    .replace(/\x1B[^[]/g, '')
+    .replace(/[\x00-\x08\x0b-\x1f\x7f\x80-\x9f]/g, '');
+}
+
+/** Strips terminal escape sequences, control characters, and line breaks for single-line UI output. */
+export function sanitizeTerminalText(str: string): string {
+  return stripAnsi(str).replace(/[\r\n\t]+/g, ' ');
 }
 
 export class TuiScraper {
@@ -101,6 +172,7 @@ export class TuiScraper {
     private readonly env?: Record<string, string>,
     private readonly width = 220,
     private readonly height = 50,
+    private readonly extraArgs: string[] = [],
   ) {
     this.sessionId = `af-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
   }
@@ -122,25 +194,23 @@ export class TuiScraper {
       throw new Error('tmux not found — install with: brew install tmux');
     }
 
-    let envPrefix = '';
-    if (this.env && Object.keys(this.env).length > 0) {
-      envPrefix = 'env ' + Object.entries(this.env)
-        .map(([k, v]) => `${k}=${expandTilde(v)}`)
-        .join(' ') + ' ';
-    }
-
-    const fullCmd = `${envPrefix}${this.command}`;
+    const fullCmd = buildInteractiveShellCommand(this.command, this.env, this.extraArgs);
     const userShell = process.env.SHELL || '/bin/sh';
+    const cwd = getSafeWorkingDir();
 
-    debug('tmux', `starting session ${this.sessionId} for command: ${fullCmd} via shell ${userShell}`);
+    debug(
+      'tmux',
+      `starting session ${this.sessionId} for command ${JSON.stringify(this.command)} in ${cwd} via ${userShell}`,
+      this.env ? { env: redactEnv(this.env), extraArgs: this.extraArgs } : undefined,
+    );
 
-    // If fullCmd is simple and has no custom env or spaces/aliases, run directly;
-    // otherwise wrap in userShell -i -c "..." so aliases from ~/.zshrc or ~/.bashrc resolve
+    // Pass shell and args as separate argv entries so tmux invokes userShell directly
+    // without passing fullCmd through an extra /bin/sh -c double-quote parse.
     const runArgs = [
       'new-session', '-d', '-s', this.sessionId,
-      '-c', process.cwd(),
+      '-c', cwd,
       '-x', String(this.width), '-y', String(this.height),
-      `${userShell} -i -c ${JSON.stringify(fullCmd)}`,
+      userShell, '-i', '-c', fullCmd,
     ];
 
     execFileSync('tmux', runArgs, { stdio: 'ignore', timeout: 5000 });
@@ -179,14 +249,15 @@ export class TuiScraper {
     const deadline = Date.now() + timeoutMs;
     debug('tmux:waitFor', `[${this.sessionId}] waiting for ${pattern} (timeout ${timeoutMs}ms, history=${historyLines})`);
     while (Date.now() < deadline) {
+      const aliveBefore = this.isAlive();
       const text = this.capture(historyLines);
-      if (pattern.test(text)) {
+      if (aliveBefore && pattern.test(text)) {
         debug('tmux:waitFor', `[${this.sessionId}] matched ${pattern}`);
         return text;
       }
       if (!this.isAlive()) {
         debug('tmux:waitFor', `[${this.sessionId}] session exited early while waiting for ${pattern}`);
-        return text;
+        throw new Error(`TuiScraper session exited early before matching ${pattern}`);
       }
       await sleep(100);
     }
