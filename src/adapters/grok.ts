@@ -3,9 +3,9 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { QuotaAdapter, UsageSnapshot } from './index.js';
-import { TuiScraper, sleep } from '../tmux.js';
+import { TuiScraper, assertSafeCommand, resolveEnv, shellQuote, sleep, stripAnsi } from '../tmux.js';
 import { debug } from '../debug.js';
-import { AccountConfig, CONFIG_DIR } from '../config.js';
+import { AccountConfig, CONFIG_DIR, ensurePrivateDir, getSafeWorkingDir } from '../config.js';
 
 const STALE_CACHE_MAX_MS = 10 * 60 * 1000;
 const GROK_STARTUP_MS = 25_000;
@@ -36,64 +36,90 @@ async function readLastOfficial(account?: AccountConfig): Promise<UsageSnapshot 
 
 async function saveOfficial(snapshot: UsageSnapshot, account?: AccountConfig): Promise<void> {
   try {
-    await fs.mkdir(CONFIG_DIR, { recursive: true });
-    await fs.writeFile(cachePath(account), JSON.stringify({ fetchedAt: Date.now(), snapshot }), { mode: 0o600 });
+    if (!ensurePrivateDir(CONFIG_DIR)) return;
+    const target = cachePath(account);
+    await fs.writeFile(target, JSON.stringify({ fetchedAt: Date.now(), snapshot }), { mode: 0o600 });
+    await fs.chmod(target, 0o600);
   } catch (err) { debug('grok:cache', 'could not save quota', String(err)); }
 }
 
-function isCommandAvailable(cmd: string): boolean {
+function isCommandAvailable(cmd: string, env?: Record<string, string>): boolean {
+  const safeCmd = assertSafeCommand(cmd);
+  const bin = safeCmd.split(/\s+/)[0];
+  if (!bin) return false;
+  const cwd = getSafeWorkingDir();
   try {
-    const bin = cmd.trim().split(/\s+/)[0];
-    if (!bin) return false;
-    execFileSync('which', [bin], { stdio: 'ignore', timeout: 3000 });
+    execFileSync('which', [bin], { cwd, stdio: 'ignore', timeout: 3000 });
     return true;
   } catch {
-    return false;
+    // Also check shell aliases/functions via interactive login shell
+    try {
+      const userShell = process.env.SHELL || '/bin/sh';
+      execFileSync(userShell, ['-i', '-c', `command -v ${shellQuote(bin)}`], {
+        cwd,
+        stdio: 'ignore',
+        timeout: 4000,
+        env: resolveEnv(env),
+      });
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 
-function stripAnsi(str: string): string {
-  return str
-    .replace(/\x1B\[[\x20-\x3f]*[\x40-\x7e]/g, '')
-    .replace(/\x1B[^[]/g, '')
-    .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '');
-}
-
-interface GrokScrapeResult {
+export interface GrokScrapeResult {
+  isNotLoggedIn?: boolean;
   quotaReached: boolean;
   remainingPercent: number | null;
   usedPercent: number | null;
   resetAt: string | null;
+  limitType?: 'session' | 'weekly' | 'monthly' | 'daily';
   sessionRemainingPct?: number | null;
   sessionResetAt?: string | null;
   weeklyRemainingPct?: number | null;
   weeklyResetAt?: string | null;
 }
 
-function parseGrokOutput(raw: string): GrokScrapeResult {
+export function parseGrokOutput(raw: string): GrokScrapeResult {
   const clean = stripAnsi(raw);
 
   debug('grok:parse', 'parsing scrape text', { length: clean.length });
 
-  // Check for rate limit or quota reached
-  if (/quota reached|rate limit reached|usage limit reached|credits depleted|balance exhausted/i.test(clean)) {
-    const resetMatch = clean.match(/resets?\s+(?:in\s+)?((?:\d+h)?(?:\d+m)?(?:\d+s)?)/i);
-    const resetAt = resetMatch ? resetMatch[1] : null;
-    debug('grok:parse', 'quota reached detected', { resetAt });
+  if (clean === 'NOT_LOGGED_IN' || /Login to xAI|Not logged in|Authentication required/i.test(clean)) {
+    return {
+      isNotLoggedIn: true,
+      quotaReached: false,
+      remainingPercent: null,
+      usedPercent: null,
+      resetAt: 'not logged in',
+    };
+  }
+
+  // Check for rate limit, quota reached, or spending cap
+  if (/quota reached|rate limit reached|usage limit reached|credits depleted|balance exhausted|You(?:'ve)? hit your (?:weekly |daily |monthly )?limit|hit your spending cap/i.test(clean)) {
+    const resetMatch = clean.match(/resets?\s+(?:in\s+|at\s+)?([^\n\r)]+)/i);
+    const resetAt = resetMatch ? resetMatch[1].trim() : null;
+    const limitType: 'weekly' | 'monthly' | 'daily' | 'session' =
+      /weekly/i.test(clean) ? 'weekly' :
+      /monthly/i.test(clean) ? 'monthly' :
+      /daily/i.test(clean) ? 'daily' : 'session';
+    debug('grok:parse', 'quota reached detected', { resetAt, limitType });
     return {
       quotaReached: true,
       remainingPercent: 0,
       usedPercent: 100,
       resetAt,
+      limitType,
     };
   }
 
   // 1. Session / rolling limit (e.g., 5h limit or session limit)
-  const sessionMatches = [...clean.matchAll(/(?:5h|session|hourly|daily)\s*(?:limit|allowance)?:\s*(?:\[.*?\]\s*)?(\d+)%\s*(?:left|remaining)(?:\s*\(resets\s+([^)]+)\))?/gi)];
+  const sessionMatches = [...clean.matchAll(/(?:5h|session|hourly|daily)\s*(?:limit|allowance|pool)?:\s*(?:\[.*?\]\s*)?([\d.]+)%\s*(?:left|remaining)(?:\s*\(resets\s+([^)]+)\))?/gi)];
   const sessionMatch = sessionMatches.at(-1);
 
   // 2. Weekly / monthly limit
-  const weeklyMatches = [...clean.matchAll(/(?:weekly|monthly)\s*(?:limit|allowance)?:\s*(?:\[.*?\]\s*)?(\d+)%\s*(?:left|remaining)(?:\s*\(resets\s+([^)]+)\))?/gi)];
+  const weeklyMatches = [...clean.matchAll(/(?:weekly|monthly)\s*(?:limit|allowance|pool)?:\s*(?:\[.*?\]\s*)?([\d.]+)%\s*(?:left|remaining)(?:\s*\(resets\s+([^)]+)\))?/gi)];
   const weeklyMatch = weeklyMatches.at(-1);
 
   let sessionRemainingPct: number | null = null;
@@ -102,12 +128,12 @@ function parseGrokOutput(raw: string): GrokScrapeResult {
   let weeklyResetAt: string | null = null;
 
   if (sessionMatch) {
-    sessionRemainingPct = Math.min(100, Math.max(0, parseInt(sessionMatch[1], 10)));
+    sessionRemainingPct = Math.min(100, Math.max(0, Math.round(parseFloat(sessionMatch[1]))));
     sessionResetAt = sessionMatch[2]?.trim() || null;
   }
 
   if (weeklyMatch) {
-    weeklyRemainingPct = Math.min(100, Math.max(0, parseInt(weeklyMatch[1], 10)));
+    weeklyRemainingPct = Math.min(100, Math.max(0, Math.round(parseFloat(weeklyMatch[1]))));
     weeklyResetAt = weeklyMatch[2]?.trim() || null;
   }
 
@@ -116,15 +142,16 @@ function parseGrokOutput(raw: string): GrokScrapeResult {
       ? Math.min(sessionRemainingPct, weeklyRemainingPct)
       : (sessionRemainingPct ?? weeklyRemainingPct);
 
-    const resetAt = sessionRemainingPct !== null && (weeklyRemainingPct === null || sessionRemainingPct <= weeklyRemainingPct)
-      ? sessionResetAt
-      : weeklyResetAt;
+    const sessionLimiting = sessionRemainingPct !== null && (weeklyRemainingPct === null || sessionRemainingPct <= weeklyRemainingPct);
+    const resetAt = sessionLimiting ? sessionResetAt : weeklyResetAt;
+    const limitType: 'session' | 'weekly' = sessionLimiting ? 'session' : 'weekly';
 
     return {
-      quotaReached: false,
+      quotaReached: remainingPercent === 0,
       remainingPercent,
       usedPercent: remainingPercent !== null ? 100 - remainingPercent : null,
       resetAt,
+      limitType,
       sessionRemainingPct,
       sessionResetAt,
       weeklyRemainingPct,
@@ -133,35 +160,39 @@ function parseGrokOutput(raw: string): GrokScrapeResult {
   }
 
   // 3. Generic percent remaining: "75% remaining" or "75% left"
-  const genericRemaining = clean.match(/(\d+)%\s*(?:remaining|left|allowance)\b/i);
+  const genericRemaining = clean.match(/([\d.]+)%\s*(?:remaining|left|allowance)\b/i);
   if (genericRemaining) {
-    const pct = Math.min(100, Math.max(0, parseInt(genericRemaining[1], 10)));
+    const pct = Math.min(100, Math.max(0, Math.round(parseFloat(genericRemaining[1]))));
     const resetMatch = clean.match(/(?:resets?|refreshes?)(?:\s+(?:at|in))?\s+([^)\n,]+)/i);
     const resetAt = resetMatch ? resetMatch[1].trim() : null;
+    const limitType = /weekly/i.test(clean) ? 'weekly' : /monthly/i.test(clean) ? 'monthly' : 'session';
     return {
-      quotaReached: false,
+      quotaReached: pct === 0,
       remainingPercent: pct,
       usedPercent: 100 - pct,
       resetAt,
+      limitType,
     };
   }
 
   // 4. Generic percent used: "25% used"
-  const genericUsed = clean.match(/(\d+)%\s*used\b/i);
+  const genericUsed = clean.match(/([\d.]+)%\s*used\b/i);
   if (genericUsed) {
-    const used = Math.min(100, Math.max(0, parseInt(genericUsed[1], 10)));
+    const used = Math.min(100, Math.max(0, Math.round(parseFloat(genericUsed[1]))));
     const remainingPercent = 100 - used;
     const resetMatch = clean.match(/(?:resets?|refreshes?)(?:\s+(?:at|in))?\s+([^)\n,]+)/i);
     const resetAt = resetMatch ? resetMatch[1].trim() : null;
+    const limitType = /weekly/i.test(clean) ? 'weekly' : /monthly/i.test(clean) ? 'monthly' : 'session';
     return {
-      quotaReached: false,
+      quotaReached: remainingPercent === 0,
       remainingPercent,
       usedPercent: used,
       resetAt,
+      limitType,
     };
   }
 
-  // 5. Credits remaining format: "Credits: $14.20 / $20.00" or "$14.20 remaining"
+  // 5. Credits remaining format: "Credits: $14.20 / $20.00"
   const creditsRatio = clean.match(/Credits?:\s*\$?([\d.]+)\s*(?:\/|\bout of\b)\s*\$?([\d.]+)/i);
   if (creditsRatio) {
     const current = parseFloat(creditsRatio[1]);
@@ -169,10 +200,11 @@ function parseGrokOutput(raw: string): GrokScrapeResult {
     if (total > 0) {
       const remainingPercent = Math.min(100, Math.max(0, Math.round((current / total) * 100)));
       return {
-        quotaReached: false,
+        quotaReached: remainingPercent === 0,
         remainingPercent,
         usedPercent: 100 - remainingPercent,
         resetAt: null,
+        limitType: 'monthly',
       };
     }
   }
@@ -206,7 +238,9 @@ async function runGrokScrape(cmd = 'grok', env?: Record<string, string>): Promis
 
     // Dismiss blocking dialogs (trust folder, update available)
     while (GROK_DIALOG.test(screen) || !GROK_READY.test(screen)) {
-      if (/Trust this folder|Do you trust/i.test(screen)) {
+      if (/Sign in|Login to xAI|Authorize/i.test(screen)) {
+        return 'NOT_LOGGED_IN';
+      } else if (/Trust this folder|Do you trust/i.test(screen)) {
         debug('grok:scrape', 'Trust folder prompt detected — confirming with Enter');
         tui.sendKey('Enter');
       } else if (/Update available/i.test(screen)) {
@@ -244,7 +278,7 @@ async function runGrokScrape(cmd = 'grok', env?: Record<string, string>): Promis
       const rendered = tui.capture(100);
       const parsed = parseGrokOutput(rendered);
 
-      if (parsed.quotaReached || parsed.remainingPercent !== null) {
+      if (parsed.isNotLoggedIn || parsed.quotaReached || parsed.remainingPercent !== null) {
         return rendered;
       }
 
@@ -298,7 +332,7 @@ export class GrokQuotaAdapter implements QuotaAdapter {
       };
     };
 
-    if (!isCommandAvailable(cmd)) {
+    if (!isCommandAvailable(cmd, env)) {
       debug('grok:fetch', `CLI command "${cmd}" not found on PATH`);
       return fallback();
     }
@@ -308,15 +342,29 @@ export class GrokQuotaAdapter implements QuotaAdapter {
       const raw = await runGrokScrape(cmd, env);
       const result = parseGrokOutput(raw);
 
+      if (result.isNotLoggedIn) {
+        return {
+          tool: toolId,
+          displayName,
+          remainingPercent: null,
+          usedPercent: null,
+          resetAt: 'not logged in',
+          source: 'unknown',
+        };
+      }
+
       if (result.remainingPercent !== null) {
-        const isFreeTier = /Free plan|\(Free\)/i.test(raw);
+        const isFreeTier = /Free plan|\(Free\)|\bFree\b tier/i.test(raw);
         const snapshot: UsageSnapshot = {
           tool: toolId,
           displayName,
           remainingPercent: result.remainingPercent,
           usedPercent: result.usedPercent,
           resetAt: result.resetAt,
+          limitType: result.limitType,
           isFreeTier,
+          weeklyLimitReached: result.limitType === 'weekly' && result.remainingPercent === 0,
+          monthlyLimitReached: result.limitType === 'monthly' && result.remainingPercent === 0,
           source: 'official-cli',
           breakdown: (result.sessionRemainingPct != null || result.weeklyRemainingPct != null) ? {
             fiveHour: result.sessionRemainingPct ?? null,

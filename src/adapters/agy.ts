@@ -1,17 +1,35 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import os from 'node:os';
 import { QuotaAdapter, UsageSnapshot } from './index.js';
-import { TuiScraper, sleep } from '../tmux.js';
+import {
+  TuiScraper,
+  assertSafeCommand,
+  buildInteractiveShellCommand,
+  expandTilde,
+  resolveEnv,
+  sanitizeTerminalText,
+  sleep,
+  stripAnsi,
+} from '../tmux.js';
 import { debug } from '../debug.js';
+import { AccountConfig, CONFIG_DIR, ensurePrivateDir, getSafeWorkingDir } from '../config.js';
 
-import { AccountConfig } from '../config.js';
+const execFileAsync = promisify(execFile);
 
-const CACHE_PATH = path.join(os.homedir(), '.gemini/antigravity-cli/.agent-fuel-quota-cache.json');
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const STALE_CACHE_MAX_MS = 30 * 60 * 1000;
+const AGY_JSON_TIMEOUT_MS = 12_000;
 
-interface ModelQuotaEntry {
+export function agyCachePath(account?: AccountConfig): string {
+  const identity = JSON.stringify([account?.id ?? 'default', account?.command ?? 'agy', account?.env ?? {}]);
+  const key = crypto.createHash('sha256').update(identity).digest('hex').slice(0, 16);
+  return path.join(CONFIG_DIR, `agy-quota-${key}.json`);
+}
+
+export interface ModelQuotaEntry {
   group?: string;
   model: string;
   percent: number;
@@ -23,10 +41,36 @@ interface QuotaCache {
   entries: ModelQuotaEntry[];
 }
 
+interface AgyJsonBucket {
+  id?: string;
+  name?: string;
+  description?: string;
+  window?: string;
+  remaining_fraction?: number;
+  reset_time?: string;
+  disabled?: boolean;
+}
+
+interface AgyJsonGroup {
+  name?: string;
+  description?: string;
+  buckets?: AgyJsonBucket[];
+}
+
+interface AgyUsageJsonPayload {
+  status?: string;
+  command?: {
+    name?: string;
+    data?: {
+      groups?: AgyJsonGroup[];
+    };
+  };
+}
+
 export function isArgonEntry(e: ModelQuotaEntry): boolean {
   const g = e.group || '';
-  const m = e.model || '';
-  return /argon/i.test(g) || /argon/i.test(m);
+  if (g) return /argon/i.test(g);
+  return /argon/i.test(e.model || '');
 }
 
 export function isOtherEntry(e: ModelQuotaEntry): boolean {
@@ -77,7 +121,136 @@ function isGroupHeader(line: string, nextLine: string): boolean {
   return false;
 }
 
-// ── Scraping ───────────────────────────────────────────────────────────────
+// ── JSON CLI extraction (primary engine for AGY 1.1.11+) ───────────────────
+
+export function formatAgyResetTime(resetTime: string | undefined, percent: number, nowMs = Date.now()): string | null {
+  if (!resetTime) {
+    return percent >= 100 ? 'Quota available' : null;
+  }
+  const resetMs = Date.parse(resetTime);
+  if (!Number.isFinite(resetMs) || new Date(resetMs).getUTCFullYear() <= 1971) {
+    return percent >= 100 ? 'Quota available' : null;
+  }
+  const diffMs = resetMs - nowMs;
+  if (diffMs <= 0) {
+    return percent >= 100 ? 'Quota available' : 'Refreshes soon';
+  }
+  const totalMinutes = Math.max(1, Math.round(diffMs / 60_000));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return hours > 0 ? `Refreshes in ${hours}h ${minutes}m` : `Refreshes in ${minutes}m`;
+}
+
+/** Parses `agy -p "/usage" --output-format json` stdout into normalized ModelQuotaEntry items. */
+export function parseAgyJsonOutput(rawStdout: string, nowMs = Date.now()): ModelQuotaEntry[] {
+  const start = rawStdout.indexOf('{');
+  const end = rawStdout.lastIndexOf('}');
+  if (start === -1 || end <= start) return [];
+
+  const payload = JSON.parse(rawStdout.slice(start, end + 1)) as AgyUsageJsonPayload;
+  const groups = payload?.command?.data?.groups;
+  if (!Array.isArray(groups)) return [];
+
+  const entries: ModelQuotaEntry[] = [];
+  for (const group of groups) {
+    const groupName = group.name ? sanitizeTerminalText(group.name).trim() : '';
+    if (!groupName || !Array.isArray(group.buckets)) continue;
+
+    for (const bucket of group.buckets) {
+      const cleanBucketName = bucket.name ? sanitizeTerminalText(bucket.name).trim() : '';
+      const bucketLabel =
+        cleanBucketName ||
+        (bucket.window === 'weekly' ? 'Weekly Limit Remaining' :
+         bucket.window === '5h' ? 'Five Hour Limit Remaining' : 'Limit Remaining');
+
+      const percent = bucket.disabled
+        ? 0
+        : typeof bucket.remaining_fraction === 'number' && Number.isFinite(bucket.remaining_fraction)
+          ? Math.round(Math.max(0, Math.min(1, bucket.remaining_fraction)) * 100)
+          : 0;
+
+      const cleanDesc = bucket.description ? sanitizeTerminalText(bucket.description).trim() : '';
+      const refreshLine = bucket.disabled
+        ? (cleanDesc || 'Disabled')
+        : formatAgyResetTime(bucket.reset_time, percent, nowMs);
+
+      entries.push({
+        group: groupName.toUpperCase(),
+        model: `${groupName.toUpperCase()} - ${bucketLabel}`,
+        percent,
+        refreshLine,
+      });
+    }
+  }
+  return entries;
+}
+
+type AgyJsonFetchResult =
+  | { kind: 'ok'; entries: ModelQuotaEntry[] }
+  | { kind: 'no-quota'; reason: string }
+  | { kind: 'unavailable'; reason: string };
+
+async function fetchAgyUsageJson(cmd = 'agy', env?: Record<string, string>): Promise<AgyJsonFetchResult> {
+  const safeCmd = assertSafeCommand(cmd);
+  const mergedEnv = resolveEnv(env);
+  const cwd = getSafeWorkingDir();
+  const args = ['-p', '/usage', '--output-format', 'json'];
+
+  const runDirect = async () => {
+    const parts = safeCmd.split(/\s+/);
+    const bin = expandTilde(parts[0]);
+    const extraArgs = parts.slice(1);
+    return execFileAsync(bin, [...extraArgs, ...args], {
+      cwd,
+      env: mergedEnv,
+      timeout: AGY_JSON_TIMEOUT_MS,
+      maxBuffer: 1024 * 1024,
+    });
+  };
+
+  const runViaShell = async () => {
+    const userShell = process.env.SHELL || '/bin/sh';
+    const shellCmd = buildInteractiveShellCommand(safeCmd, env, args);
+    return execFileAsync(userShell, ['-i', '-c', shellCmd], {
+      cwd,
+      env: mergedEnv,
+      timeout: AGY_JSON_TIMEOUT_MS,
+      maxBuffer: 1024 * 1024,
+    });
+  };
+
+  try {
+    let stdout = '';
+    try {
+      ({ stdout } = await runDirect());
+    } catch (directErr) {
+      const errObj = directErr as { code?: string; message?: string; stdout?: string; stderr?: string };
+      // Retry via interactive shell only if the command wasn't directly found on PATH (e.g. shell alias)
+      if (errObj.code === 'ENOENT') {
+        ({ stdout } = await runViaShell());
+      } else {
+        throw directErr;
+      }
+    }
+
+    const entries = parseAgyJsonOutput(stdout);
+    if (entries.length > 0) {
+      debug('agy:json', `parsed ${entries.length} quota buckets via -p /usage --output-format json`);
+      return { kind: 'ok', entries };
+    }
+    return { kind: 'unavailable', reason: 'Empty quota groups in AGY JSON output' };
+  } catch (err) {
+    const errObj = err as { code?: number | string; stdout?: string; stderr?: string; message?: string };
+    const combined = `${errObj.stdout ?? ''}\n${errObj.stderr ?? ''}\n${errObj.message ?? ''}`;
+    if (/GEMINI_API_KEY|AI Studio|no account quota|not logged in|authenticate|sign in/i.test(combined)) {
+      return { kind: 'no-quota', reason: /GEMINI_API_KEY|AI Studio|no account quota/i.test(combined) ? 'billing active' : 'not logged in' };
+    }
+    debug('agy:json', 'JSON CLI query failed, falling back to tmux TUI scrape', combined.trim().slice(0, 300));
+    return { kind: 'unavailable', reason: errObj.message || String(err) };
+  }
+}
+
+// ── TUI Scraping (fallback for older AGY versions) ─────────────────────────
 
 /**
  * Launches `agy` in a tmux session, opens the `/usage` panel, waits for
@@ -94,7 +267,7 @@ async function runAgyUsage(cmd = 'agy', env?: Record<string, string>): Promise<s
       debug('agy:scrape', 'trust prompt detected — confirming with Enter');
       await sleep(300); // ensure app is fully interactive before sending input
       tui.sendKey('Enter');
-      await tui.waitFor(/for shortcuts/, 15_000);
+      await tui.waitFor(/for shortcuts/i, 15_000);
     }
 
     // Navigate to /usage panel
@@ -118,11 +291,7 @@ async function runAgyUsage(cmd = 'agy', env?: Record<string, string>): Promise<s
       const complete = gemini.length > 0 && other.length > 0 &&
         gemini.some(e => /weekly/i.test(e.model)) &&
         other.some(e => /weekly/i.test(e.model));
-      const hasArgon = /argon/i.test(lastScreen);
-      if (complete && hasArgon) {
-        const argon = entries.filter(e => isArgonEntry(e));
-        if (argon.length > 0) return lastScreen;
-      } else if (complete && !hasArgon) {
+      if (complete) {
         return lastScreen;
       }
       await sleep(200);
@@ -138,7 +307,7 @@ async function runAgyUsage(cmd = 'agy', env?: Record<string, string>): Promise<s
 // ── Parsing ────────────────────────────────────────────────────────────────
 
 export function parseQuotaPanel(raw: string): ModelQuotaEntry[] {
-  const lines = raw.split(/\r?\n/);
+  const lines = stripAnsi(raw).split(/\r?\n/);
   const results: ModelQuotaEntry[] = [];
 
   const headerIdx = lines.findIndex(l => /Models?\s*(?:&\s*)?Quota/i.test(l));
@@ -244,8 +413,8 @@ export function parseQuotaPanel(raw: string): ModelQuotaEntry[] {
 
 // ── Cache helpers ──────────────────────────────────────────────────────────
 
-async function readCache(accountKey = 'default'): Promise<QuotaCache | null> {
-  const cacheFile = CACHE_PATH.replace('.json', `-${accountKey}.json`);
+async function readCache(account?: AccountConfig): Promise<QuotaCache | null> {
+  const cacheFile = agyCachePath(account);
   try {
     const cache = JSON.parse(await fs.readFile(cacheFile, 'utf-8')) as QuotaCache;
     if (!Number.isFinite(cache.fetchedAt) || !Array.isArray(cache.entries) ||
@@ -254,14 +423,24 @@ async function readCache(accountKey = 'default'): Promise<QuotaCache | null> {
   } catch { return null; }
 }
 
-async function writeCache(entries: ModelQuotaEntry[], accountKey = 'default'): Promise<void> {
-  const cacheFile = CACHE_PATH.replace('.json', `-${accountKey}.json`);
+async function writeCache(entries: ModelQuotaEntry[], account?: AccountConfig): Promise<void> {
+  const cacheFile = agyCachePath(account);
   try {
-    await fs.writeFile(cacheFile, JSON.stringify({ fetchedAt: Date.now(), entries }), 'utf-8');
+    if (!ensurePrivateDir(CONFIG_DIR)) return;
+    await fs.writeFile(cacheFile, JSON.stringify({ fetchedAt: Date.now(), entries }), { encoding: 'utf-8', mode: 0o600 });
+    await fs.chmod(cacheFile, 0o600);
   } catch { /* non-fatal */ }
 }
 
 // ── Bucket aggregation ────────────────────────────────────────────────────
+
+export function agyBaseLabels(account?: AccountConfig): { baseId: string; prefix: string; indent: string } {
+  const baseId = account?.id || 'agy';
+  const baseName = account?.displayName || 'AGY';
+  const prefix = baseName.replace(/\s+(Gemini|Flash & Pro|Argon|Other|Claude & GPT)$/i, '');
+  const indent = ' '.repeat(prefix.length);
+  return { baseId, prefix, indent };
+}
 
 export function buildSnapshots(
   entries: ModelQuotaEntry[],
@@ -269,10 +448,7 @@ export function buildSnapshots(
   account?: AccountConfig,
 ): UsageSnapshot[] {
   const source = fromCache ? 'cache' : 'official-cli';
-  const baseId = account?.id || 'agy';
-  const baseName = account?.displayName || 'AGY';
-  const prefix = baseName.replace(/\s+(Gemini|Argon|Other)$/i, '');
-  const indent = ' '.repeat(prefix.length);
+  const { baseId, prefix, indent } = agyBaseLabels(account);
 
   const geminiToolId = `${baseId}-gemini`;
   const argonToolId = `${baseId}-argon`;
@@ -336,7 +512,7 @@ export function buildSnapshots(
     };
   }
 
-  // Dynamic future blocks: check for any groups that don't match core Gemini, Other, or Argon
+  // Dynamic extra groups: only emitted if AGY reports additional groups beyond Gemini and Other
   const customGroups = new Map<string, ModelQuotaEntry[]>();
   for (const entry of entries) {
     if (!isCoreGeminiEntry(entry) && !isOtherEntry(entry) && !isArgonEntry(entry)) {
@@ -347,16 +523,19 @@ export function buildSnapshots(
     }
   }
 
+  const hasArgon = argonEntries.length > 0;
   const hasExtra = customGroups.size > 0;
-  const geminiName = `${prefix} ╭ Flash & Pro`;
+  const geminiName = `${prefix} ╭ Gemini`;
   const argonName  = `${indent} │ Argon`;
   const otherName  = hasExtra ? `${indent} │ Other` : `${indent} ╰ Other`;
 
   const snapshots: UsageSnapshot[] = [
     worstCase(geminiEntries, geminiToolId, geminiName, 'GEMINI MODELS'),
-    worstCase(argonEntries,  argonToolId, argonName,  'GEMINI 4 ARGON'),
-    worstCase(otherEntries,  otherToolId, otherName,  'CLAUDE AND GPT MODELS'),
   ];
+  if (hasArgon) {
+    snapshots.push(worstCase(argonEntries, argonToolId, argonName, 'GEMINI 4 ARGON'));
+  }
+  snapshots.push(worstCase(otherEntries, otherToolId, otherName, 'CLAUDE AND GPT MODELS'));
 
   let extraIdx = 0;
   const totalExtra = customGroups.size;
@@ -366,7 +545,7 @@ export function buildSnapshots(
     const connector = isLast ? '╰' : '│';
     const slug = groupName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
     const toolId = `${baseId}-${slug}`;
-    const cleanTitle = groupName.replace(/\b\w/g, c => c.toUpperCase());
+    const cleanTitle = groupName.toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
     const displayName = `${indent} ${connector} ${cleanTitle}`;
     snapshots.push(worstCase(groupEntries, toolId, displayName, groupName));
   }
@@ -380,51 +559,69 @@ export class AgyQuotaAdapter implements QuotaAdapter {
   constructor(private readonly account?: AccountConfig) {}
 
   public async fetchSnapshots(): Promise<UsageSnapshot[]> {
-    const accountKey = this.account?.id || 'default';
     const cmd = this.account?.command || 'agy';
     const env = this.account?.env;
+    const { baseId, prefix, indent } = agyBaseLabels(this.account);
+
+    const makeDefaultRows = (source: UsageSnapshot['source'], resetAt: string | null, remainingPercent: number | null, raw?: unknown): UsageSnapshot[] => [
+      {
+        tool: `${baseId}-gemini`,
+        displayName: `${prefix} ╭ Gemini`,
+        remainingPercent,
+        usedPercent: remainingPercent !== null ? 100 - remainingPercent : null,
+        resetAt,
+        source,
+        raw,
+      },
+      {
+        tool: `${baseId}-other`,
+        displayName: `${indent} ╰ Other`,
+        remainingPercent,
+        usedPercent: remainingPercent !== null ? 100 - remainingPercent : null,
+        resetAt,
+        source,
+        raw,
+      },
+    ];
 
     // Fast path: serve from cache if fresh enough
-    const cached = await readCache(accountKey);
+    const cached = await readCache(this.account);
     if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
       return buildSnapshots(cached.entries, true, this.account);
     }
 
-    // Slow path: spawn agy via tmux, scrape the quota panel
+    // Primary engine: non-interactive structured JSON output (AGY 1.1.11+)
+    const jsonResult = await fetchAgyUsageJson(cmd, env);
+    if (jsonResult.kind === 'ok' && hasGroups(jsonResult.entries)) {
+      await writeCache(jsonResult.entries, this.account);
+      return buildSnapshots(jsonResult.entries, false, this.account);
+    }
+    if (jsonResult.kind === 'no-quota') {
+      if (jsonResult.reason === 'billing active') {
+        return makeDefaultRows('official-cli', 'billing active', 100);
+      }
+      return makeDefaultRows('unknown', 'not logged in', null);
+    }
+
+    // Fallback engine: spawn agy via tmux, scrape the /usage quota panel
     try {
       const raw = await runAgyUsage(cmd, env);
       const entries = parseQuotaPanel(raw);
 
       if (hasGroups(entries)) {
-        await writeCache(entries, accountKey);
+        await writeCache(entries, this.account);
         return buildSnapshots(entries, false, this.account);
       }
 
       if (cached) return buildSnapshots(cached.entries, true, this.account);
 
-      const baseId = this.account?.id || 'agy';
-      const baseName = this.account?.displayName || 'AGY';
-      const prefix = baseName.replace(/\s+(Gemini|Flash & Pro|Argon|Other)$/i, '');
-      const indent = ' '.repeat(prefix.length);
-      return [
-        { tool: `${baseId}-gemini`, displayName: `${prefix} ╭ Flash & Pro`, remainingPercent: null, usedPercent: null, resetAt: null, source: 'unknown' },
-        { tool: `${baseId}-argon`,  displayName: `${indent} │ Argon`,  remainingPercent: null, usedPercent: null, resetAt: null, source: 'unknown' },
-        { tool: `${baseId}-other`,  displayName: `${indent} ╰ Other`,  remainingPercent: null, usedPercent: null, resetAt: null, source: 'unknown' },
-      ];
+      return makeDefaultRows('unknown', null, null);
 
     } catch (error) {
       if (cached) return buildSnapshots(cached.entries, true, this.account);
       debug('agy:fetch', 'quota scrape failed', String(error));
       const msg = error instanceof Error ? error.message : String(error);
-      const baseId = this.account?.id || 'agy';
-      const baseName = this.account?.displayName || 'AGY';
-      const prefix = baseName.replace(/\s+(Gemini|Flash & Pro|Argon|Other)$/i, '');
-      const indent = ' '.repeat(prefix.length);
-      return [
-        { tool: `${baseId}-gemini`, displayName: `${prefix} ╭ Flash & Pro`, remainingPercent: null, usedPercent: null, resetAt: null, source: 'unknown', raw: msg },
-        { tool: `${baseId}-argon`,  displayName: `${indent} │ Argon`,  remainingPercent: null, usedPercent: null, resetAt: null, source: 'unknown', raw: msg },
-        { tool: `${baseId}-other`,  displayName: `${indent} ╰ Other`,  remainingPercent: null, usedPercent: null, resetAt: null, source: 'unknown', raw: msg },
-      ];
+      return makeDefaultRows('unknown', null, null, msg);
     }
   }
 }
